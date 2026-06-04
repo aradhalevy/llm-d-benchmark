@@ -15,8 +15,8 @@ repo root. Just **run `llmdbenchmark` from the repo root** (its default
 Contents: `tools/` (GPU/MFU + plotting), `ipp_configs/` (base-model ConfigMaps),
 `config/` (the `kind-sim-multi` + `ocp-qwen3-multi` scenarios & specs),
 `workload/profiles/inference-perf/` (saturation/scrape profiles),
-`collect_logs.sh`, and `example_outputs/` (sample plots + one full
-`collected-logs-` dir). Raw run data isn't included.
+`collect_logs.sh`, and `example_outputs/` (sample comparison plots + story
+HTMLs). Raw `collected-logs-` run data isn't included (too large).
 
 Two scenarios:
 - **Kind** (`cicd/kind-sim-multi`) — `llm-d-inference-sim` pods, no GPU. Two
