@@ -1,0 +1,7 @@
+# DCGM GPU metrics  window=2026-06-03T18:19:40Z..18:20:00Z  (20s)  ns=llm-d-arad
+DCGM_FI_PROF_PIPE_TENSOR_ACTIVE  gpu=5 pod=qwen-qwe-65acc96e--30b-a3b-decode-6bf8755468-gwhrt  mean(busy)=   4.0%  peak=   4.6%
+DCGM_FI_PROF_SM_ACTIVE           gpu=5 pod=qwen-qwe-65acc96e--30b-a3b-decode-6bf8755468-gwhrt  mean(busy)=  17.0%  peak=  32.2%
+DCGM_FI_PROF_DRAM_ACTIVE         gpu=5 pod=qwen-qwe-65acc96e--30b-a3b-decode-6bf8755468-gwhrt  mean(busy)=  13.6%  peak=  29.5%
+DCGM_FI_PROF_PIPE_FP16_ACTIVE    gpu=5 pod=qwen-qwe-65acc96e--30b-a3b-decode-6bf8755468-gwhrt  mean(busy)=   0.0%  peak=   0.0%
+DCGM_FI_DEV_GPU_UTIL             gpu=5 pod=qwen-qwe-65acc96e--30b-a3b-decode-6bf8755468-gwhrt  mean(busy)=  99.7%  peak= 100.0%
+DCGM_FI_DEV_POWER_USAGE          gpu=5 pod=qwen-qwe-65acc96e--30b-a3b-decode-6bf8755468-gwhrt  mean(busy)= 244.2W  peak= 516.7W

@@ -60,10 +60,20 @@ class RenderProfilesStep(Step):
             default="sanity_random.yaml",
         )
 
-        # Locate source profiles directory
+        # Locate source profiles directories. Search the standard location plus
+        # the ipp_benchmarking overlay, so bundle profiles resolve without copying
+        # them into workload/profiles/. The standard location wins on conflicts.
         base_dir = context.base_dir or Path(__file__).resolve().parents[3]
-        profiles_source = base_dir / "workload" / "profiles" / harness_name
-        if not profiles_source.is_dir():
+        profile_dirs = [
+            d
+            for d in (
+                base_dir / "workload" / "profiles" / harness_name,
+                base_dir / "ipp_benchmarking" / "workload" / "profiles" / harness_name,
+            )
+            if d.is_dir()
+        ]
+        if not profile_dirs:
+            profiles_source = base_dir / "workload" / "profiles" / harness_name
             errors.append(f"Profiles directory not found: {profiles_source}")
             return StepResult(
                 step_number=self.number,
@@ -73,6 +83,15 @@ class RenderProfilesStep(Step):
                 errors=errors,
                 stack_name=stack_name,
             )
+        profiles_source = profile_dirs[0]
+
+        def _find_profile(name: str) -> Path | None:
+            """First match for ``name`` (or ``name.in``) across profile dirs."""
+            for d in profile_dirs:
+                for cand in (d / name, d / f"{name}.in"):
+                    if cand.exists():
+                        return cand
+            return None
 
         # CLI flags and runtime values override plan_config defaults
         runtime_values: dict[str, str] = {
@@ -110,20 +129,18 @@ class RenderProfilesStep(Step):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy all profiles to output first (non-.yaml.in files are copied as-is)
-        for src_file in profiles_source.iterdir():
-            if src_file.is_file() and not src_file.name.endswith(".yaml.in"):
-                shutil.copy2(src_file, output_dir / src_file.name)
+        for d in profile_dirs:
+            for src_file in d.iterdir():
+                if src_file.is_file() and not src_file.name.endswith(".yaml.in"):
+                    shutil.copy2(src_file, output_dir / src_file.name)
 
         # Determine treatments
         treatments = self._resolve_treatments(context, plan_config)
 
         if not treatments:
             # Single default treatment -- render the profile as-is
-            source_file = profiles_source / profile_name
-            if not source_file.exists():
-                # Try with .in extension
-                source_file = profiles_source / f"{profile_name}.in"
-            if source_file.exists():
+            source_file = _find_profile(profile_name)
+            if source_file is not None:
                 # Determine output name (strip .in if present)
                 out_name = profile_name
                 if out_name.endswith(".in"):
@@ -147,11 +164,8 @@ class RenderProfilesStep(Step):
                 treatment_name = treatment.get("name", f"treatment-{i}")
                 treatment_overrides = treatment.get("overrides", {})
 
-                source_file = profiles_source / profile_name
-                if not source_file.exists():
-                    source_file = profiles_source / f"{profile_name}.in"
-
-                if not source_file.exists():
+                source_file = _find_profile(profile_name)
+                if source_file is None:
                     errors.append(
                         f"Profile '{profile_name}' not found for treatment "
                         f"'{treatment_name}'"

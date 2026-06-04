@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opt-125m-base-model
+  labels:
+    inference.llm-d.ai/ipp-managed: "true"
+data:
+  baseModel: "facebook/opt-125m"
