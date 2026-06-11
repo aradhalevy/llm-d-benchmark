@@ -151,6 +151,30 @@ is needed); EPP `metric family "vllm:lora_requests_info" not found`; brief
 defaults — include every plugin. A plugin that reads the body sees nothing unless
 `provider.supportedEvents.requestBody` / `responseBody` is `true`.
 
+**`experimentalHttpRoute` no longer exists in current llm-d-benchmark
+templates.** Older repo versions rendered per-pool header-match HTTPRoutes
+(X-Gateway-Base-Model-Name) from the scenario's
+`inferenceExtension.experimentalHttpRoute` — the current templates ignore
+that key entirely (08_httproute.yaml renders empty when `httpRoute.enabled:
+false`), so the gateway 404s everything. Apply the routes explicitly after
+standup: `ipp_configs/qwen-gemma-httproutes.yaml` (adjust the hashed
+InferencePool names).
+
+**Scenario `model.size` is the decode pod's emptyDir limit — undersizing it
+is an eviction loop.** The `model-storage` emptyDir's `sizeLimit` comes from
+the scenario's `model.size`; if the checkpoint is bigger, the pod downloads
+weights, gets `Evicted` ("Usage of EmptyDir volume ... exceeds the limit"),
+and a replacement repeats forever. Qwen3-32B BF16 needs `size: 70Gi` (the
+checkpoint is ~64GB). Live fix without re-standup: patch the deployment
+volume's `emptyDir.sizeLimit` directly.
+
+**IPP config changes don't restart the pod.** The chart has no ConfigMap
+checksum annotation, so a `helm upgrade` that only changes `customConfig` /
+`listModels` updates the ConfigMap but leaves the old pod running with the old
+config. Always `kubectl rollout restart deploy/payload-processor -n <ns>` after
+a config-only upgrade, and verify with:
+`kubectl logs <new-pod> | grep "Loaded raw configuration"`.
+
 **`provider.messageTimeout=10s` is required.** Without it Envoy's ~200 ms default
 trips `HTTP 504 ext_proc_error_per-message_timeout_exceeded` once IPP defers
 header ACKs under load.
