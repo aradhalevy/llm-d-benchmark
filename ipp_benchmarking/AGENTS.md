@@ -101,6 +101,14 @@ logs, EPP scores, decode KV/queue) — one without the other can't answer it.
   — **not** `DCGM_FI_DEV_GPU_UTIL` (pinned ~100%, useless) nor `PIPE_FP16_ACTIVE`
   (~0, vLLM is BF16). Analyze with `tools/compute_mfu.py` (MFU =
   `2·active_params·tokens / peak_FLOPs`, H100 BF16 989.4 TFLOP/s).
+- **In-flight counter leak (scorer bug) — restart IPP between A/B arms.**
+  `request-metadata-extractor` increments `Requests` per request but decrements
+  only on *response events* (`requestmetadata/plugin.go:195` vs `:208`). Failed
+  requests (Envoy 504/503) never emit a response event, so a failure storm leaves
+  the counter stuck high → `idleness ≈ 0` → the avg-ttft staleness decay never
+  engages → a saturated backend's EMA freezes and it loses scoring until an IPP
+  restart (observed: traffic locked onto the drowned backend; `rollout restart`
+  fixed it). Relates to IPP PR #37 — failed requests must decrement the counter.
 
 ---
 
