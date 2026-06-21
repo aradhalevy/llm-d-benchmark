@@ -29,19 +29,29 @@ Bottom-bar variants (same top panel): `--bars split` (above, one bar per model) 
 
 ![routing vs concurrency](./routing_vs_concurrency_kind.png)
 
+Each arm's path is a positional `LABEL=path` arg (changeable). `path` can be **either** a
+trimmed arm dir (holding `per_request_lifecycle_metrics.json`) **or** a full
+`collect_logs.sh` bundle — the scripts find `per_request_lifecycle_metrics.json` at any depth
+(e.g. `<bundle>/benchmark-results/results/*/`) and pick the largest. So to re-plot straight
+from collected logs, just point the args at the bundles:
+
 ```bash
-B=ipp_benchmarking/example_outputs/kind-concurrency-sweep-30-230
 C=30,50,70,90,110,130,150,170,190,210,230
+RANDOM_LOGS=collected-logs-30230-random       # or any collect_logs.sh bundle / arm dir
+INFLIGHT_LOGS=collected-logs-30230-inflight
 python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_kind.py \
-  "random routing (load-blind)"=$B/random "PR#46 inflight-aware scorer"=$B/inflight \
-  --concurrencies $C --bars split   -o $B/latency_vs_concurrency_kind.png
+  "random routing (load-blind)"=$RANDOM_LOGS "PR#46 inflight-aware scorer"=$INFLIGHT_LOGS \
+  --concurrencies $C --bars split   -o latency_vs_concurrency_kind.png
 python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_kind.py \
-  "random routing (load-blind)"=$B/random "PR#46 inflight-aware scorer"=$B/inflight \
-  --concurrencies $C --bars stacked -o $B/latency_vs_concurrency_kind_stacked.png
+  "random routing (load-blind)"=$RANDOM_LOGS "PR#46 inflight-aware scorer"=$INFLIGHT_LOGS \
+  --concurrencies $C --bars stacked -o latency_vs_concurrency_kind_stacked.png
 python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_kind.py \
-  "random routing (load-blind)"=$B/random "PR#46 inflight-aware scorer"=$B/inflight \
-  --concurrencies $C -o $B/routing_vs_concurrency_kind.png
+  "random routing (load-blind)"=$RANDOM_LOGS "PR#46 inflight-aware scorer"=$INFLIGHT_LOGS \
+  --concurrencies $C -o routing_vs_concurrency_kind.png
 ```
+
+(The PNGs in this dir were generated from the trimmed `./random` and `./inflight` extracts of
+those same bundles — pass `$B/random` / `$B/inflight` with `B=` this dir to reproduce them.)
 
 ## Result
 

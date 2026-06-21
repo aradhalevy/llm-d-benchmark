@@ -60,9 +60,11 @@ def served_model(rec: dict):
 
 
 def load_rows(run: Path):
-    pf = max(glob.glob(str(run / "per_request_lifecycle_metrics.json"))
-             or glob.glob(str(run / "benchmark-results" / "results" / "*" / "per_request_lifecycle_metrics.json")),
-             key=lambda f: len(json.load(open(f))))
+    # accept a trimmed arm dir OR a full collect_logs.sh bundle: find the file at any depth
+    cands = glob.glob(str(run / "**" / "per_request_lifecycle_metrics.json"), recursive=True)
+    if not cands:
+        sys.exit(f"no per_request_lifecycle_metrics.json under {run}")
+    pf = max(cands, key=lambda f: len(json.load(open(f))))
     rows = []
     for r in json.load(open(pf)):
         st, et = r.get("start_time"), r.get("end_time")
