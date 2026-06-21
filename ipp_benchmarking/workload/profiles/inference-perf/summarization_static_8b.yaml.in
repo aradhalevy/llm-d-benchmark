@@ -1,0 +1,38 @@
+# "NO routing" static baseline for the deep-research-agent A/B. The app statically
+# assigns each request type to a model: summarization -> small model, planning -> big
+# model. Here the summarizer is PINNED to Qwen/Qwen3-8B (single model name -> the IPP
+# model-name-filter leaves exactly one candidate, so the picker never chooses and the
+# idle 32B is never used for summaries). This is the load-blind default that "smart
+# routing" must beat: when the 8B saturates there is nowhere to spill to.
+#
+# Identical ramp / token shape to summarization_concurrency_8b32b.yaml so the only
+# variable vs the smart arm is the model_name (array -> single).
+load:
+  type: concurrent
+  interval: 15
+  request_timeout: 60
+  stages:
+  - {concurrency_level: 100, num_requests: 400}
+  - {concurrency_level: 200, num_requests: 800}
+  - {concurrency_level: 300, num_requests: 1200}
+  - {concurrency_level: 400, num_requests: 1600}
+  - {concurrency_level: 500, num_requests: 2000}
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  # Static assignment: summaries always to the small model.
+  model_name: "Qwen/Qwen3-8B"
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: Qwen/Qwen3-8B
+data:
+  type: random
+  input_distribution:  {min: 1024, max: 4096, mean: 2048, std_dev: 512, total_count: 200}
+  output_distribution: {min: 128,  max: 512,  mean: 256,  std_dev: 64,  total_count: 200}
+report:
+  request_lifecycle: {summary: true, per_stage: true, per_request: true}
+storage:
+  local_storage: {path: /workspace}

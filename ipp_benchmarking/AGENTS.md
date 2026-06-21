@@ -151,6 +151,22 @@ is needed); EPP `metric family "vllm:lora_requests_info" not found`; brief
 defaults — include every plugin. A plugin that reads the body sees nothing unless
 `provider.supportedEvents.requestBody` / `responseBody` is `true`.
 
+**Multi-stack runs render `REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL` with
+stack 1's model for every stack.** A profile using that placeholder gets the
+first stack's model name even in the second stack's pass (observed: the
+qwen3-32b pass rendered `model_name: Qwen/Qwen3-8B` and re-ran the 8B
+benchmark). Workaround: run one stack at a time with explicit overrides —
+`--stack <name> -m <model>` — and verify the rendered profile:
+`kubectl get cm inference-perf-profiles -o yaml | grep model_name`.
+
+**A cluster `gpu-reaper` scales idle GPU deployments to 0 after 90 minutes**
+(pokprod001; annotation `gpu-reaper.io/reason: Idle since ... freeing N
+GPU(s)` on the deployment). A model pool left idle while you debug something
+else silently loses its pod, and the next benchmark run sends traffic into a
+dead backend. Check `kubectl get deploy` replicas before every run and
+`kubectl scale deploy/<decode> --replicas=1` to restore; keep idle gaps under
+90 minutes during multi-hour sessions.
+
 **`experimentalHttpRoute` no longer exists in current llm-d-benchmark
 templates.** Older repo versions rendered per-pool header-match HTTPRoutes
 (X-Gateway-Base-Model-Name) from the scenario's
