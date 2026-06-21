@@ -50,29 +50,33 @@ helm uninstall payload-processor -n llmdbench                 # IPP isn't torn d
 
 ---
 
-## OpenShift research-agent A/B (ocp-qwen3-8b-32b)
+## OpenShift A/B: smart routing vs random (ocp-qwen3-8b-32b)
 
-A deep-research agent: a **Qwen3-8B summarizer** (the saturating workload,
-hundreds of page-summary calls) + a **Qwen3-32B planner** (rare, pinned). The
-inflight-aware **avg-ttft scorer** offloads summarizer overflow onto the idle
-32B when the 8B saturates. Headline result
-([`example_outputs/ocp-research-agent-blog/`](./example_outputs/ocp-research-agent-blog/README.md)):
-**+35% summaries completed, 33% vs 51% failures, ~2.2–2.4× goodput** at the
-C=400/500 ceiling — paid for by planner contention on the shared 32B.
+**One workload, two models.** A single **summarizer** harness offers *both*
+models on every request — a JSON **string-array** `model_name`
+(`'["Qwen/Qwen3-8B","Qwen/Qwen3-32B"]'`) means "IPP, pick one". The 8B is the
+fast default; the 32B sits idle until the 8B saturates. Ramp C=100→500 (6000
+reqs). The **A/B delta is only the IPP config** — same workload, same models:
 
-One script per arm (`tools/ab_blog_run.sh`) drives the summarizer via
-`llmdbenchmark` **and** an in-pod curl planner (no second namespace), captures
-IPP decisions through two unioned/deduped log nets, pulls the OpenShift logs,
-and slim-extracts the giant per-request file in-pod. Standup deploys **both**
-pools (`cicd/ocp-qwen3-8b-32b`); the run uses the single-harness `-summarizer`
-spec so one harness is the only load source (IPP still routes across both). The
-A/B delta is just the summarizer's `model_name`: a JSON **string-array**
-(`'["Qwen/Qwen3-8B","Qwen/Qwen3-32B"]'` → scorer picks) vs. a pinned single
-name.
+- **smart** (`scorer-ipp-config.yaml`): `avg-ttft-scorer` + `max-score-picker`
+  — keeps most traffic on the fast 8B and offloads only the overflow to the 32B
+  as load climbs (8B share 80%, 32B 20%, rising with concurrency).
+- **random** (`random-ipp-config.yaml`): no scorer, so `max-score-picker`
+  breaks ties uniformly — a load-blind **~50/50** split that floods the 32B from
+  the start.
+
+Result ([`example_outputs/ocp-research-agent-routing/`](./example_outputs/ocp-research-agent-routing/)):
+smart completes **4201 vs random's 3255 summaries (+29%), 30% vs 46% failures** —
+the load-blind 50/50 saturates the slow 32B far earlier.
+
+One script per arm (`tools/ab_routing_run.sh <arm> <ipp_config>`) swaps the IPP
+ConfigMap + restarts, runs the **single** summarizer harness (no planner → the
+IPP decision log is uncontaminated), warms both backends through the cold-start
+window, then collects logs + the slim per-request extract + routing analysis.
 
 ```bash
 # Prereqs: OCP cluster w/ H100-80GB, `oc login`, HF_TOKEN with Qwen access,
-#          IPP image (smart avg-ttft build) in a registry the cluster pulls.
+#          IPP image in a registry the cluster pulls.
 export NAMESPACE=llm-d-<you>
 export IPP_PATH=/path/to/llm-d-inference-payload-processor
 
@@ -80,7 +84,7 @@ export IPP_PATH=/path/to/llm-d-inference-payload-processor
 #    32B decode deploy after standup or it crash-loops.)
 llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 
-# 2. Install IPP — pure avg-ttft inflight-aware scorer.
+# 2. Install IPP (any working customConfig; ab_routing_run.sh swaps it per arm).
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" --set provider.name=istio \
   -f ipp_benchmarking/ipp_configs/avgttft-blog-values.yaml \
@@ -89,25 +93,21 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
                               -f ipp_benchmarking/ipp_configs/qwen3-32b-base-model.yaml
 
-# 3. Edit the vars at the top of tools/ab_blog_run.sh: REPO, NS, GW.
+# 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO, NS, GW.
 
-# 4. Run each arm (one arm per invocation). Restart IPP between arms — the
-#    in-flight counter leak freezes a saturated EMA otherwise (AGENTS.md).
-ipp_benchmarking/tools/ab_blog_run.sh arm_a_smart  summarization_concurrency_8b32b.yaml   # smart: model array -> scorer offloads
-kubectl rollout restart deploy/payload-processor -n "$NAMESPACE"
-ipp_benchmarking/tools/ab_blog_run.sh arm_b_static summarization_static_8b.yaml           # baseline: pinned 8B
+# 4. Run each arm (one per invocation; the script sets the IPP config + restarts).
+ipp_benchmarking/tools/ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/scorer-ipp-config.yaml
+ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/random-ipp-config.yaml
 
 # 5. Plot (exact usage is in each script's docstring header).
-D=ipp_benchmarking/example_outputs/ocp-research-agent-blog
-ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/arm_a_smart "static"=$D/arm_b_static --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
-ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/arm_a_smart "static"=$D/arm_b_static --concurrencies 100,200,300,400,500 --planner 150 -o $D/routing_vs_concurrency_ab.png
-ipp_benchmarking/tools/plot_planner_latency_ab.py "smart"=$D/arm_a_smart/planner "static"=$D/arm_b_static/planner --concurrencies 1,2,3,4,5 -o $D/planner_latency_ab.png
+D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
+ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/routing_vs_concurrency_ab.png
+ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
 ```
 
-`ab_blog_run.sh` writes into `example_outputs/ocp-research-agent-blog/<arm>/`
-(a re-run overwrites the committed sample). The smart-vs-**random** routing
-variant uses `ab_routing_run.sh` with `ipp_configs/blog-ocp-random-values.yaml`
-→ `example_outputs/ocp-research-agent-routing/`.
+`ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`
+(a re-run overwrites the committed sample). Both arms drive the same
+`summarization_concurrency_8b32b.yaml` profile — only the IPP config changes.
 
 ---
 
