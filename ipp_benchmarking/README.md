@@ -117,8 +117,8 @@ ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/max
 
 # 5. Plot (exact usage is in each script's docstring header).
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
-ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/routing_vs_concurrency_ab.png
-ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
+ipp_benchmarking/tools/plot_routing_vs_concurrency_kind.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/routing_vs_concurrency_ab.png
+ipp_benchmarking/tools/plot_latency_vs_concurrency_kind.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
 ```
 
 `ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`
