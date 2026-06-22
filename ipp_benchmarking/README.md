@@ -58,12 +58,12 @@ models on every request — a JSON **string-array** `model_name`
 fast default; the 32B sits idle until the 8B saturates. Ramp C=100→500 (6000
 reqs). The **A/B delta is only the IPP config** — same workload, same models:
 
-- **smart** (`scorer-ipp-config.yaml`): `avg-ttft-scorer` + `max-score-picker`
-  — keeps most traffic on the fast 8B and offloads only the overflow to the 32B
-  as load climbs (8B share 80%, 32B 20%, rising with concurrency).
-- **random** (`random-ipp-config.yaml`): no scorer, so `max-score-picker`
-  breaks ties uniformly — a load-blind **~50/50** split that floods the 32B from
-  the start.
+- **smart** (`blog-ocp-ttft-only-values.yaml`): `avg-ttft-scorer` +
+  `max-score-picker` — keeps most traffic on the fast 8B and offloads only the
+  overflow to the 32B as load climbs (8B share 80%, 32B 20%, rising with
+  concurrency).
+- **random** (`blog-ocp-random-values.yaml`): `random-picker`, no scorer — a
+  load-blind **~50/50** split that floods the 32B from the start.
 
 Result ([`example_outputs/ocp-research-agent-routing/`](./example_outputs/ocp-research-agent-routing/)):
 smart completes **4201 vs random's 3255 summaries (+29%), 30% vs 46% failures** —
@@ -84,10 +84,11 @@ export IPP_PATH=/path/to/llm-d-inference-payload-processor
 #    32B decode deploy after standup or it crash-loops.)
 llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 
-# 2. Install IPP (any working customConfig; ab_routing_run.sh swaps it per arm).
+# 2. Install IPP with the smart (avg-ttft) values; ab_routing_run.sh swaps the
+#    config per arm afterwards.
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" --set provider.name=istio \
-  -f ipp_benchmarking/ipp_configs/avgttft-blog-values.yaml \
+  -f ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml \
   --set payloadProcessor.image.registry=ghcr.io/<you> --set payloadProcessor.image.tag=<tag> \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=10s
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
@@ -95,9 +96,10 @@ kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-mode
 
 # 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO, NS, GW.
 
-# 4. Run each arm (one per invocation; the script sets the IPP config + restarts).
-ipp_benchmarking/tools/ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/scorer-ipp-config.yaml
-ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/random-ipp-config.yaml
+# 4. Run each arm (one per invocation). The 2nd arg is the IPP values file; the
+#    script patches its customConfig into the cm + restarts IPP for that arm.
+ipp_benchmarking/tools/ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
+ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/blog-ocp-random-values.yaml
 
 # 5. Plot (exact usage is in each script's docstring header).
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
