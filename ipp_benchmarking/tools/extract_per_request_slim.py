@@ -31,7 +31,8 @@ def extract(path):
         if isinstance(st, (int, float)) and isinstance(et, (int, float)):
             resp = rec.get("response") or ""
             m = "big" if "Qwen3-32B" in resp else ("small" if "Qwen3-8B" in resp else None)
-            out.append({"t": st, "lat": et - st, "fail": bool(rec.get("error")), "m": m})
+            ot = (((rec.get("info") or {}).get("response_info") or {}).get("output_tokens"))
+            out.append({"t": st, "lat": et - st, "fail": bool(rec.get("error")), "m": m, "ot": ot})
         k = txt.find("{", j)
         if k == -1:
             break
