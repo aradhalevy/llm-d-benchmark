@@ -9,7 +9,7 @@
 load:
   type: concurrent
   interval: 15
-  request_timeout: 60          # client waits past the 30s route timeout, so a 504 is recorded as a real failure
+  request_timeout: 1200        # no client-side cap; with the route timeout lifted, requests complete instead of being shed
   stages:
   - {concurrency_level: 100, num_requests: 400}
   - {concurrency_level: 200, num_requests: 800}

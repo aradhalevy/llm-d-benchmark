@@ -7,7 +7,7 @@
 # kubectl-patched deployment on this cluster, so we touch only the cm).
 #   ab_routing_run.sh <arm_name> <ipp_values_file>
 # e.g. ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
-#      ab_routing_run.sh random ipp_benchmarking/ipp_configs/blog-ocp-random-values.yaml
+#      ab_routing_run.sh random ipp_benchmarking/ipp_configs/maxscore-baseline-values.yaml
 set -u
 ARM="${1:?arm}"; CFG="${2:?ipp values file}"
 REPO=/home/arad/new_git_repos/new_benchmark/llm-d-benchmark
@@ -24,6 +24,11 @@ rm -f "$STOP"; : > "$DEST/decisions_rolling.log"; : > "$DEST/decisions_follow.lo
 oc patch cm payload-processor -n $NS --type merge -p "$(python3 -c "import json,yaml;cc=yaml.safe_load(open('$CFG'))['payloadProcessor']['customConfig'];print(json.dumps({'data':{'custom-ipp-config.yaml':yaml.safe_dump(cc,sort_keys=False)}}))")"
 oc rollout restart deploy/payload-processor -n $NS
 oc rollout status deploy/payload-processor -n $NS --timeout=120s
+# No timeouts: lift the per-route 30s request timeout (the sole load-shedder) so requests
+# complete instead of recording 504s. Survives across runs; re-applied per arm to be safe.
+for r in $(oc get httproute -n $NS -o name | grep -E 'qwen3-(8b|32b)'); do
+  oc patch "$r" -n $NS --type=json -p='[{"op":"replace","path":"/spec/rules/0/timeouts/request","value":"1200s"}]' 2>/dev/null
+done
 POD=$(oc get pods -n $NS --no-headers | grep payload-processor | grep Running | awk '{print $1}' | head -1)
 D8=$(oc get pods -n $NS --no-headers | grep 'qwen3-8b-decode' | grep Running | awk '{print $1}' | head -1)
 D32=$(oc get pods -n $NS --no-headers | grep 'wen3-32b-decode' | grep Running | awk '{print $1}' | head -1)
@@ -49,7 +54,7 @@ done
 WSTOP=/tmp/abr_${ARM}_warmstop; rm -f "$WSTOP"
 ( while [ ! -f "$WSTOP" ]; do
     for m in "Qwen/Qwen3-8B" "Qwen/Qwen3-32B"; do
-      ( oc exec -n $NS $DAP -- curl -s -o /dev/null -m 30 -X POST "$GW/v1/completions" -H 'Content-Type: application/json' \
+      ( oc exec -n $NS $DAP -- curl -s -o /dev/null -m 1200 -X POST "$GW/v1/completions" -H 'Content-Type: application/json' \
           -d "{\"model\":\"$m\",\"prompt\":\"warm the ema\",\"max_tokens\":8}" 2>/dev/null ) &
     done; wait; sleep 1
   done ) & WARM=$!

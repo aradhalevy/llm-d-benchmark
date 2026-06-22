@@ -35,7 +35,7 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
   -n llmdbench --set provider.name=istio \
   --set payloadProcessor.image.tag=smartRouting --set payloadProcessor.image.pullPolicy=Never \
   --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
-  --set provider.supportedEvents.responseBody=true --set provider.messageTimeout=10s \
+  --set provider.supportedEvents.responseBody=true --set provider.messageTimeout=1200s \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway \
   --set 'payloadProcessor.listModels[0]=facebook/opt-125m' --set 'payloadProcessor.listModels[1]=facebook/opt-350m'
 kubectl apply -n llmdbench -f ipp_benchmarking/ipp_configs/opt-125m-base-model.yaml \
@@ -62,12 +62,19 @@ reqs). The **A/B delta is only the IPP config** — same workload, same models:
   `max-score-picker` — keeps most traffic on the fast 8B and offloads only the
   overflow to the 32B as load climbs (8B share 80%, 32B 20%, rising with
   concurrency).
-- **random** (`blog-ocp-random-values.yaml`): `random-picker`, no scorer — a
-  load-blind **~50/50** split that floods the 32B from the start.
+- **random** (`maxscore-baseline-values.yaml`): `max-score-picker`, no scorer —
+  ties break randomly, so it acts as a random picker: a load-blind **~50/50**
+  split that floods the 32B from the start.
 
-Result ([`example_outputs/ocp-research-agent-routing/`](./example_outputs/ocp-research-agent-routing/)):
-smart completes **4201 vs random's 3255 summaries (+29%), 30% vs 46% failures** —
-the load-blind 50/50 saturates the slow 32B far earlier.
+All timeouts are lifted (route + client `request_timeout` to 1200s, ext-proc
+`messageTimeout` to 1200s) so nothing is shed — the delta is latency/throughput,
+not failures.
+
+Result ([`example_outputs/ocp-timeout-sweep-50-550/`](./example_outputs/ocp-timeout-sweep-50-550/)):
+**0 failures both arms.** smart keeps **85–96%** on the fast 8B (random ~50/50),
+giving **~5× lower p95** (smart 72s vs random 366s at peak) and **~3–4×
+throughput** (2400–3600 vs ~800 tok/s) — the load-blind 50/50 bottlenecks on the
+slow 32B instead.
 
 One script per arm (`tools/ab_routing_run.sh <arm> <ipp_config>`) swaps the IPP
 ConfigMap + restarts, runs the **single** summarizer harness (no planner → the
@@ -90,16 +97,23 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
   -n "$NAMESPACE" --set provider.name=istio \
   -f ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml \
   --set payloadProcessor.image.registry=ghcr.io/<you> --set payloadProcessor.image.tag=<tag> \
-  --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=10s
+  --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=1200s
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
                               -f ipp_benchmarking/ipp_configs/qwen3-32b-base-model.yaml
+
+# No timeouts: lift the per-route 30s request timeout (the sole load-shedder) so requests
+# complete instead of being shed. ab_routing_run.sh re-applies this per arm.
+for r in $(kubectl get httproute -n "$NAMESPACE" -o name | grep -E 'qwen3-(8b|32b)'); do
+  kubectl patch "$r" -n "$NAMESPACE" --type=json \
+    -p='[{"op":"replace","path":"/spec/rules/0/timeouts/request","value":"1200s"}]'
+done
 
 # 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO, NS, GW.
 
 # 4. Run each arm (one per invocation). The 2nd arg is the IPP values file; the
 #    script patches its customConfig into the cm + restarts IPP for that arm.
 ipp_benchmarking/tools/ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
-ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/blog-ocp-random-values.yaml
+ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/maxscore-baseline-values.yaml
 
 # 5. Plot (exact usage is in each script's docstring header).
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
