@@ -6,13 +6,10 @@ end-to-end with [llm-d-benchmark](https://github.com/llm-d/llm-d-benchmark).
 **Read [`AGENTS.md`](./AGENTS.md) first** — the required fixes, gotchas, and
 findings live there, not here.
 
-Run `llmdbenchmark` **from the repo root**; it auto-discovers this bundle's
+Run `llmdbenchmark` **from the repo root** — it auto-discovers this bundle's
 scenarios/specs/profiles (e.g. `--spec cicd/ocp-qwen3-8b-32b`,
-`-w summarization_concurrency_8b32b.yaml`). Contents: `tools/` (plotting +
-GPU/MFU), `ipp_configs/` (base-model ConfigMaps + IPP helm values), `config/`
-(scenarios & specs), `workload/profiles/inference-perf/`, `collect_logs.sh`,
-and `example_outputs/` (sample plots + writeups; raw run data is too large to
-ship).
+`-w summarization_concurrency_8b32b.yaml`). `example_outputs/` ships sample plots
++ writeups only; raw run data is too large to commit.
 
 ---
 
@@ -71,15 +68,13 @@ All timeouts are lifted (route + client `request_timeout` to 1200s, ext-proc
 not failures.
 
 Result ([`example_outputs/ocp-timeout-sweep-50-550/`](./example_outputs/ocp-timeout-sweep-50-550/)):
-**0 failures both arms.** smart keeps **85–96%** on the fast 8B (random ~50/50),
-giving **~5× lower p95** (smart 72s vs random 366s at peak) and **~3–4×
-throughput** (2400–3600 vs ~800 tok/s) — the load-blind 50/50 bottlenecks on the
-slow 32B instead.
+smart keeps **85–96%** on the fast 8B (random ~50/50) → **~5× lower p95** and
+**~3–4× throughput**, 0 failures either arm.
 
 One script per arm (`tools/ab_routing_run.sh <arm> <ipp_config>`) swaps the IPP
-ConfigMap + restarts, runs the **single** summarizer harness (no planner → the
-IPP decision log is uncontaminated), warms both backends through the cold-start
-window, then collects logs + the slim per-request extract + routing analysis.
+config + restarts, runs the summarizer harness (no planner, so the IPP decision
+log is clean), warms both backends, then collects logs + the slim extract +
+routing analysis.
 
 ```bash
 # Prereqs: OCP cluster w/ H100-80GB, `oc login`, HF_TOKEN with Qwen access,
@@ -108,23 +103,34 @@ for r in $(kubectl get httproute -n "$NAMESPACE" -o name | grep -E 'qwen3-(8b|32
     -p='[{"op":"replace","path":"/spec/rules/0/timeouts/request","value":"1200s"}]'
 done
 
-# 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO, NS, GW.
+# 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO (repo path), NS
+#    (namespace), GW (in-cluster gateway URL — embeds the namespace).
 
 # 4. Run each arm (one per invocation). The 2nd arg is the IPP values file; the
 #    script patches its customConfig into the cm + restarts IPP for that arm.
 ipp_benchmarking/tools/ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
 ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/maxscore-baseline-values.yaml
 
-# 5. Plot (exact usage is in each script's docstring header).
+# 5. Plot (exact usage is in each script's docstring header). Run plotters with
+#    the venv python — they need matplotlib/numpy: `source .venv/bin/activate` (or
+#    prefix `.venv/bin/python3`). ab_routing_run.sh already built each arm's inputs:
+#    per_request_slim.json (latency plotter) + decisions_*.log (routing plotter).
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
-ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/routing_vs_concurrency_ab.png
-ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
+.venv/bin/python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/routing_vs_concurrency_ab.png
+.venv/bin/python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
 ```
 
 `ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`
 (a re-run overwrites the committed sample). Both arms drive the same
 `summarization_concurrency_8b32b.yaml` profile — only the IPP config changes.
 
----
+**Plotting a plain `llmdbenchmark run`** (not via `ab_routing_run.sh`): the raw
+`per_request_lifecycle_metrics.json` is 100MB–1GB and often truncated, so build the
+slim extract the OCP **latency** plotter needs first (the **routing** plotter needs
+the IPP decision log, which only `ab_routing_run.sh` captures):
 
-**Troubleshooting, required fixes, and findings → [`AGENTS.md`](./AGENTS.md).**
+```bash
+.venv/bin/python3 ipp_benchmarking/tools/extract_per_request_slim.py \
+  <results>/.../per_request_lifecycle_metrics.json  <arm_dir>/per_request_slim.json
+# -> "<n> records  8B=<x> 32B=<y> fail=<z>"; then point the latency plotter at <arm_dir>
+```
