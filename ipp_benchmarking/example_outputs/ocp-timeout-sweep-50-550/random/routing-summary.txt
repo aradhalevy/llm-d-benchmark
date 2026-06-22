@@ -1,0 +1,6 @@
+=== ARM random (summarizer only, no planner; ipp_benchmarking/ipp_configs/random-ipp-config.yaml) ===
+Traceback (most recent call last):
+  File "/home/arad/new_git_repos/new_benchmark/llm-d-benchmark/ipp_benchmarking/tools/analyze_routing.py", line 21, in <module>
+    for line in open(log, errors="ignore"):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/arad/new_git_repos/new_benchmark/llm-d-benchmark/ipp_benchmarking/example_outputs/ocp-timeout-sweep-50-550/random/ipp-decisions.log'
