@@ -190,7 +190,7 @@ def find_epponly_endpoint(
     In llm-d's standalone router topology (``gateway.className: epponly``)
     no Kubernetes Gateway is deployed; the EPP pod runs an Envoy sidecar
     that serves HTTP on the same service as the gRPC ExtProc port.
-    Clients hit ``{model_id_label}-gaie-epp:80`` directly.
+    Clients hit ``{model_id_label}-router-epp:80`` directly.
 
     Returns:
         (clusterIP, serviceName, port) or (None, expected_name, "80") if
@@ -199,7 +199,7 @@ def find_epponly_endpoint(
     if not model_id_label:
         return None, None, "80"
 
-    svc_name = f"{model_id_label}-gaie-epp"
+    svc_name = f"{model_id_label}-router-epp"
     # Fetch the whole service as JSON and pick the HTTP port in Python.
     # Earlier this used a `jsonpath` filter (``?(@.port==80)``) but that
     # syntax is not reliably handled by every kubectl/oc version we ship
@@ -592,6 +592,13 @@ _RETRYABLE_INDICATORS = (
     "still loading",
     "503",
     "502",
+    # FMA cold-start race: bound launcher pod is k8s-Ready
+    # but vLLM's serving port isn't accepting yet,
+    # and EPP InferencePool is empty until ISC labels propagate.
+    "Connection refused",
+    "upstream connect error",
+    "remote connection failure",
+    "no pods available in datastore",
 )
 
 

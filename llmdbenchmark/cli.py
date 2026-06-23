@@ -27,7 +27,7 @@ from llmdbenchmark.utilities.os.filesystem import (
     resolve_specification_file,
 )
 from llmdbenchmark.interface.commands import Command
-from llmdbenchmark.result_store.store import StoreManager
+from llmdbenchmark.results_store.store import StoreManager
 from llmdbenchmark.telemetry import init_telemetry, get_telemetry
 import getpass
 from llmdbenchmark.interface import plan, standup, teardown, run
@@ -121,6 +121,7 @@ def dispatch_cli(args: argparse.Namespace, logger: logging.Logger) -> None:
             cli_wva=getattr(args, "wva", False),
             cli_gateway_class=getattr(args, "gateway_class", None),
             cli_stack_filter=_parse_stack_filter(getattr(args, "stack", None)),
+            cli_non_admin=getattr(args, "non_admin", False),
         ).eval()
 
         try:
@@ -392,12 +393,16 @@ def _resolve_deploy_methods(args, plan_info, logger, phase="standup"):
         if standalone:
             logger.log_info("Auto-detected deploy method from plan: standalone")
             return ["standalone"]
-        if fma:
-            logger.log_info("Auto-detected deploy method from plan: fma")
-            return ["fma"]
+        methods = []
         if modelservice:
-            logger.log_info("Auto-detected deploy method from plan: modelservice")
-            return ["modelservice"]
+            methods.append("modelservice")
+        if fma:
+            methods.append("fma")
+        if methods:
+            logger.log_info(
+                f"Auto-detected deploy method(s) from plan: {', '.join(methods)}"
+            )
+            return methods
 
     if phase == "teardown":
         raise PhaseError(
@@ -837,6 +842,7 @@ def _do_run(args, logger, render_plan_errors, experiment_file_override=None):
         harness_data_access_timeout=int(
             getattr(args, "data_access_timeout", 120) or 120
         ),
+        pvc_bind_timeout=int(getattr(args, "pvc_bind_timeout", 240) or 240),
         stack_filter=_parse_stack_filter(getattr(args, "stack", None)),
     )
 
@@ -1202,6 +1208,7 @@ def _render_plans_for_experiment(args, logger, setup_overrides=None):
         cli_wva=getattr(args, "wva", False),
         cli_gateway_class=getattr(args, "gateway_class", None),
         setup_overrides=setup_overrides,
+        cli_non_admin=getattr(args, "non_admin", False),
     ).eval()
 
     if render_plan_errors.has_errors:
@@ -1229,11 +1236,13 @@ def _execute_experiment(args, logger):
             f"running a single cycle with spec defaults."
         )
 
-    # Wire experiment-level harness/profile as fallbacks for CLI args
+    # Wire experiment-level harness/profile/dataset as fallbacks for CLI args
     if experiment_plan.harness and not getattr(args, "harness", None):
         args.harness = experiment_plan.harness
     if experiment_plan.profile and not getattr(args, "workload", None):
         args.workload = experiment_plan.profile
+    if experiment_plan.dataset_url and not getattr(args, "dataset", None):
+        args.dataset = experiment_plan.dataset_url
 
     total_setup = len(experiment_plan.setup_treatments)
     total_run = experiment_plan.run_treatments_count

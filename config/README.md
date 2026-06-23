@@ -268,14 +268,14 @@ Jinja2 templates that produce Kubernetes resource definitions. Each template cor
 | `09_helmfile-gateway-provider.yaml.j2` | Helmfile for gateway provider (Istio/agentgateway) |
 | `10_helmfile-main.yaml.j2` | Main helmfile (llm-d-infra, modelservice) |
 | `11_infra.yaml.j2` | Infrastructure chart values |
-| `12_gaie-values.yaml.j2` | GAIE (inference extension) Helm values |
+| `12_router-values.yaml.j2` | llm-d router (EPP + InferencePool) Helm values |
 | `13_ms-values.yaml.j2` | Modelservice Helm values |
 | `14_standalone-deployment_yaml.j2` | Standalone vLLM Deployment |
 | `15_standalone-service_yaml.j2` | Standalone vLLM Service |
 | `16_pvc_extra-pvc.yaml.j2` | Extra PVCs (e.g., scratch space) |
 | `17_standalone-podmonitor.yaml.j2` | Standalone PodMonitor for metrics |
 | `18_podmonitor.yaml.j2` | Modelservice PodMonitor for metrics |
-| `19_wva-values.yaml.j2` | Workload Variant Autoscaler values |
+| `19_wva-kustomize.yaml.j2` | Workload Variant Autoscaler kustomize wrapper |
 | `20_harness_pod.yaml.j2` | Benchmark harness pod |
 | `21_prometheus-adapter-values.yaml.j2` | Prometheus adapter values |
 | `22_prometheus-rbac.yaml.j2` | Prometheus RBAC resources |
@@ -469,7 +469,7 @@ All Helm chart and component versions are centralized in the `chartVersions` sec
 | `chartVersions.inferencePool` | `v1.3.0` | Inference pool chart version |
 | `chartVersions.wva` | `auto` | Workload Variant Autoscaler chart (auto-resolved) |
 | `chartVersions.agentgateway` | `v2.2.3` | agentgateway chart version |
-| `chartVersions.lws` | `0.8.0` | LeaderWorkerSet chart version |
+| `chartVersions.lws` | `0.9.0` | LeaderWorkerSet chart version |
 
 Versions set to `auto` are resolved at plan time by `VersionResolver` using `helm search repo` or OCI registry queries (skopeo/crane). Fixed versions are used as-is.
 
@@ -887,14 +887,18 @@ scenario:
         dataLocal: 1
         workers: 1
 
-    # Configure the inference extension with context-length-aware plugin
+    # Configure the inference extension with context-length-aware plugin.
+    # `apiVersion: llm-d.ai/v1alpha1` is the canonical API group on the
+    # llm-d-router charts; the legacy
+    # `inference.networking.x-k8s.io/v1alpha1` is still accepted but
+    # deprecated.
     inferenceExtension:
       pluginsConfigFile: "context-length-aware-config.yaml"
       sidecar:
         enabled: true
       pluginsCustomConfig:
         context-length-aware-config.yaml: |
-          apiVersion: inference.networking.x-k8s.io/v1alpha1
+          apiVersion: llm-d.ai/v1alpha1
           kind: EndpointPickerConfig
           plugins:
             - type: tokenizer
@@ -1354,15 +1358,15 @@ Each image key has `repository`, `tag`, and `pullPolicy` sub-fields. The one exc
 |----------|-------------|-----------|
 | `04_download_job.yaml.j2` | `images.benchmark` | Model download job |
 | `06_pod_access_to_harness_data.yaml.j2` | `images.benchmark` | Harness data access pod |
-| `12_gaie-values.yaml.j2` | `images.inferenceScheduler` | Inference scheduling extension |
+| `12_router-values.yaml.j2` | `images.routerEndpointPicker` (legacy: `images.inferenceScheduler`) | llm-d router EPP |
 | `13_ms-values.yaml.j2` (decode) | `images.vllm` | Decode pods in modelservice |
 | `13_ms-values.yaml.j2` (prefill) | `images.vllm` | Prefill pods in modelservice |
 | `13_ms-values.yaml.j2` (sidecar) | `images.routingSidecar` | Routing sidecar in modelservice |
 | `13_ms-values.yaml.j2` (init containers) | `images.<imageKey>` | Per-init-container, via `imageKey:` (defaults to `images.benchmark`) |
-| `12_gaie-values.yaml.j2` (sidecar) | `images.udsTokenizer` | EPP sidecar (when `inferenceExtension.sidecar.enabled: true`) |
+| `12_router-values.yaml.j2` (tokenizer) | `images.udsTokenizer` | EPP UDS tokenizer (when `inferenceExtension.sidecar.enabled: true`) |
 | `14_standalone-deployment_yaml.j2` | `standalone.image` | Standalone vLLM container |
 | `14_standalone-deployment_yaml.j2` (launcher) | `standalone.launcher.image` | Standalone launcher container |
-| `19_wva-values.yaml.j2` | `wva.image` | Workload Variant Autoscaler |
+| `19_wva-kustomize.yaml.j2` | `wva.image` | Workload Variant Autoscaler |
 | `20_harness_pod.yaml.j2` | `images.benchmark` | Benchmark harness pod |
 
 ### Fallback Chains
@@ -1604,7 +1608,8 @@ kustomize:
   guideName: "optimized-baseline"    # Guide directory name under guides/
   repoPath: ""                       # Local path to llm-d repo (auto-cloned if empty)
   repoRef: "main"                    # Git ref to checkout
-  gaieVersion: ""                    # GAIE chart version (auto-detected from README if empty)
+  gaieVersion: ""                    # GAIE CRD bundle version (auto-detected from README if empty)
+  routerChartVersion: ""             # llm-d-router chart version (auto-detected from README; defaults to v0)
   acceleratorBackend: "gpu/vllm"     # Modelserver backend path
   monitoring: false                  # Apply monitoring kustomize overlay
   overlayPath: ""                    # Path to additional kustomize overlay directory

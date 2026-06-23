@@ -52,6 +52,7 @@ class RenderPlans:
         cli_gateway_class: str | None = None,
         setup_overrides: dict | None = None,
         cli_stack_filter: list[str] | None = None,
+        cli_non_admin: bool = False,
     ):
         self.template_dir = Path(template_dir)
         self.defaults_file = Path(defaults_file)
@@ -80,6 +81,17 @@ class RenderPlans:
         # _resolve_model fires once per RenderPlans instance, not N times
         # in a multi-stack scenario.
         self._cli_model_multi_stack_warned: bool = False
+
+        # ``--non-admin`` propagates into the Jinja render context as
+        # ``nonAdmin`` so templates can gate cluster-scoped resources
+        # (ClusterRole, ClusterRoleBinding, etc.) the namespaced user
+        # can't create. Currently consumed by
+        # ``05_namespace_sa_rbac_secret.yaml.j2`` to skip the
+        # ``inference-perf-service-viewer`` pair -- those are only
+        # required by the ``nop`` harness's cluster-wide service
+        # discovery, so dropping them is safe for the mainstream
+        # harnesses (inference-perf, guidellm, vllm-benchmark).
+        self.cli_non_admin: bool = bool(cli_non_admin)
 
         self.logger = logger or get_logger(
             config.log_dir, verbose=config.verbose, log_name=__name__
@@ -113,8 +125,18 @@ class RenderPlans:
         env.filters["b64encode"] = self._b64encode_filter
         env.filters["model_id_label"] = self._model_id_label_filter
 
+        # `raise` global lets templates abort rendering with a clear
+        # error when an input is invalid for the current code path
+        # (e.g. an option that only applies to some gateway classes).
+        env.globals["raise"] = self._raise_helper
+
         self._jinja_env = env
         return env
+
+    @staticmethod
+    def _raise_helper(message: str) -> str:
+        """Abort template rendering with the given error message."""
+        raise ValueError(message)
 
     @staticmethod
     def _indent_filter(text: str, width: int = 4, first: bool = False) -> str:
@@ -534,12 +556,6 @@ class RenderPlans:
                 "Cannot enable both standalone and fma -- choose one. Using standalone."
             )
             methods = ["standalone"]
-        if "modelservice" in methods and "fma" in methods:
-            self.logger.log_warning(
-                "Cannot enable both modelservice and fma -- "
-                "choose one. Using modelservice."
-            )
-            methods = ["modelservice"]
         if "kustomize" in methods and any(
             m in methods for m in ("standalone", "modelservice", "fma")
         ):
@@ -560,24 +576,23 @@ class RenderPlans:
             fma_config["enabled"] = False
             kustomize_config["enabled"] = False
             self.logger.log_info("Deploy method from CLI: standalone")
-        elif "modelservice" in methods:
-            standalone_config["enabled"] = False
-            modelservice_config["enabled"] = True
-            fma_config["enabled"] = False
-            kustomize_config["enabled"] = False
-            self.logger.log_info("Deploy method from CLI: modelservice")
-        elif "fma" in methods:
-            standalone_config["enabled"] = False
-            modelservice_config["enabled"] = False
-            fma_config["enabled"] = True
-            kustomize_config["enabled"] = False
-            self.logger.log_info("Deploy method from CLI: fma")
         elif "kustomize" in methods:
             standalone_config["enabled"] = False
             modelservice_config["enabled"] = False
             fma_config["enabled"] = False
             kustomize_config["enabled"] = True
             self.logger.log_info("Deploy method from CLI: kustomize")
+        elif "modelservice" in methods or "fma" in methods:
+            # Either or both. FMA layers on top of modelservice (or runs
+            # alone in legacy FMA-only scenarios); the two flags are
+            # independent toggles, mirroring how the CLI's runtime
+            # _resolve_deploy_methods returns both when both are enabled.
+            standalone_config["enabled"] = False
+            kustomize_config["enabled"] = False
+            modelservice_config["enabled"] = "modelservice" in methods
+            fma_config["enabled"] = "fma" in methods
+            chosen = [m for m in ("modelservice", "fma") if m in methods]
+            self.logger.log_info(f"Deploy method(s) from CLI: {', '.join(chosen)}")
 
         return result
 
@@ -838,8 +853,8 @@ class RenderPlans:
     def _resolve_inference_pool_host(self, values: dict) -> dict:
         """Auto-populate destinationRule.host from model_id_label when not set.
 
-        The Kubernetes service name for the GAIE EPP is always
-        ``{model_id_label}-gaie-epp``.  If a scenario's
+        The Kubernetes service name for the router EPP is always
+        ``{model_id_label}-router-epp``.  If a scenario's
         ``inferenceExtension.inferencePoolProviderConfig.destinationRule``
         exists but has no ``host``, fill it in automatically so that
         scenario authors don't need to compute the hashed label by hand.
@@ -852,7 +867,7 @@ class RenderPlans:
         if dest_rule is not None and not dest_rule.get("host"):
             model_id_label = values.get("model_id_label", "")
             if model_id_label:
-                dest_rule["host"] = f"{model_id_label}-gaie-epp"
+                dest_rule["host"] = f"{model_id_label}-router-epp"
                 self.logger.log_info(
                     f"Auto-resolved destinationRule.host to '{dest_rule['host']}'"
                 )
@@ -926,8 +941,18 @@ class RenderPlans:
         value (``REPLACE_TOKEN`` or empty), this method checks the
         following environment variables in order:
 
-        1. ``HF_TOKEN``
-        2. ``HUGGING_FACE_HUB_TOKEN``
+        1. ``HF_TOKEN``                -- plain HuggingFace convention
+        2. ``LLMDBENCH_HF_TOKEN``      -- project-prefixed (used in CI
+                                          and ``llmdbenchmark``-namespaced
+                                          environments)
+        3. ``HUGGING_FACE_HUB_TOKEN``  -- alternate HuggingFace convention
+
+        This chain matches every other HF-token consumer in the
+        codebase -- ``_ensure_hf_token_secret`` (the kustomize-mode
+        Secret enforcer), ``step_03_detect_endpoint``'s discovery
+        path, and the harness pod env block -- so a token set under
+        any of the three names is consistently picked up regardless
+        of which code path the user hits first.
 
         If a token is found, it is injected into the values dict along
         with its base64-encoded form so that rendered K8s Secret YAMLs
@@ -948,9 +973,14 @@ class RenderPlans:
             result["huggingface"] = hf_config
             return result
 
-        # Check environment variables (order matches HuggingFace SDK convention)
-        env_token = os.environ.get("HF_TOKEN") or os.environ.get(
-            "HUGGING_FACE_HUB_TOKEN"
+        # Check environment variables.  Order matches what
+        # ``_ensure_hf_token_secret`` and ``step_03_detect_endpoint``
+        # already use, so the harness pod's env block ends up wired up
+        # whenever the Secret would have been created.
+        env_token = (
+            os.environ.get("HF_TOKEN")
+            or os.environ.get("LLMDBENCH_HF_TOKEN")
+            or os.environ.get("HUGGING_FACE_HUB_TOKEN")
         )
         if not env_token:
             # No token available -- disable HF secret/auth rendering.
@@ -1209,6 +1239,7 @@ class RenderPlans:
         merged_values["siblingStacks"] = sibling_stacks or []
         merged_values["stackIndex"] = stack_index
         merged_values["sharedInfraStackIndex"] = shared_infra_stack_index
+        merged_values["nonAdmin"] = self.cli_non_admin
 
         epponly_errors = self._validate_epponly_constraints(
             merged_values,

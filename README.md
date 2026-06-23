@@ -582,7 +582,7 @@ Both paths share steps 00-05 (infrastructure, namespaces, secrets) and step 10 (
 | 05 | harness_namespace | Per-stack | Harness namespace (PVC, data access pod, preprocess) |
 | 06 | standalone_deploy | Per-stack | Standalone vLLM deployment (Deployment + Service) |
 | 07 | deploy_setup | Per-stack | Helm repos and gateway infrastructure (helmfile) |
-| 08 | deploy_gaie | Per-stack | GAIE inference extension deployment |
+| 08 | deploy_router | Per-stack | llm-d router (EPP + provider resources) deployment |
 | 09 | deploy_modelservice | Per-stack | Modelservice deployment (helmfile + LWS) |
 | 10 | smoketest | Per-stack | Health check, inference test, per-scenario config validation |
 | 11 | inference_test | Per-stack | Sample inference request with demo curl command |
@@ -751,7 +751,7 @@ The analysis pipeline generates per-request distribution plots, cross-treatment 
 ## Dependencies
 
 - [llm-d-infra](https://github.com/llm-d-incubation/llm-d-infra.git)
-- [llm-d-modelservice](https://github.com/llm-d/llm-d-model-service.git)
+- [llm-d-modelservice v0.4.14](https://github.com/llm-d/llm-d-model-service.git)
 - [inference-perf](https://github.com/kubernetes-sigs/inference-perf)
 - [guidellm](https://github.com/vllm-project/guidellm.git)
 - [vllm](https://github.com/vllm-project/vllm.git)

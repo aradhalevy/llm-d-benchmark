@@ -513,7 +513,7 @@ HPA, but it's still considered cluster-hygiene rude to run cluster-scoped.
 
 | Artifact | File |
 |---|---|
-| Chart values rendered into the helm install | [`config/templates/jinja/19_wva-values.yaml.j2`](../config/templates/jinja/19_wva-values.yaml.j2) |
+| Kustomize wrapper for the WVA controller install | [`config/templates/jinja/19_wva-kustomize.yaml.j2`](../config/templates/jinja/19_wva-kustomize.yaml.j2) |
 | WVA namespace label patch | [`config/templates/jinja/23_wva-namespace.yaml.j2`](../config/templates/jinja/23_wva-namespace.yaml.j2) |
 | Per-stack `VariantAutoscaling` | [`config/templates/jinja/27_wva-variantautoscaling.yaml.j2`](../config/templates/jinja/27_wva-variantautoscaling.yaml.j2) |
 | Per-stack `HorizontalPodAutoscaler` | [`config/templates/jinja/28_wva-hpa.yaml.j2`](../config/templates/jinja/28_wva-hpa.yaml.j2) |
@@ -547,7 +547,7 @@ llmdbenchmark --spec examples/multi-model-wva standup -p <namespace>
 
 Renders both stacks, installs shared infra (istio, Gateway,
 `infra-llmdbench`, WVA controller, prometheus-adapter, model PVC) once,
-then deploys each pool's `-ms` + `-gaie` + VA + HPA. Downloads run in
+then deploys each pool's `-ms` + `-router` + VA + HPA. Downloads run in
 parallel - wall time ~ slowest model, not the sum. Standup
 auto-chains into the smoketest phase unless you pass
 `--skip-smoketest`.
@@ -663,7 +663,7 @@ llmdbenchmark --spec guides/multi-model-wva teardown -p <namespace> \
   --stack llama-31-8b
 ```
 
-Uninstalls the `llama-31-8b-ms` and `llama-31-8b-gaie` Helm releases
+Uninstalls the `llama-31-8b-ms` and `llama-31-8b-router` Helm releases
 (plus their VA + HPA), leaves `qwen3-06b` and the shared
 `infra-llmdbench` + WVA controller + prometheus-adapter in place.
 Useful for cost management - shrink to one pool over a weekend
