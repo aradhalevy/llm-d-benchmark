@@ -1,5 +1,6 @@
 """Step 05 -- Create ConfigMaps for workload profiles and harness scripts."""
 
+import threading
 from pathlib import Path
 
 from llmdbenchmark.executor.step import Step, StepResult, Phase
@@ -7,6 +8,13 @@ from llmdbenchmark.executor.context import ExecutionContext
 
 # ConfigMap name used by the harness pod template (20_harness_pod.yaml.j2).
 HARNESS_SCRIPTS_CONFIGMAP = "llmdbench-harness-scripts"
+
+# ponytail: the profiles/harness-scripts ConfigMaps are fixed-named and shared
+# across stacks. Under `run --parallel >1` the per-stack threads would race on
+# the same names + local temp files (one stack fails with "Failed to create one
+# or more ConfigMaps"). Serialize just the create here; the parallel *load* still
+# runs simultaneously. Global lock is fine — creation takes a couple seconds.
+_CM_CREATE_LOCK = threading.Lock()
 
 
 class CreateProfileConfigmapStep(Step):
@@ -63,17 +71,19 @@ class CreateProfileConfigmapStep(Step):
 
         errors: list[str] = []
 
-        profile_ok, profile_msg = self._create_profiles_configmap(
-            context, cmd, harness_name, harness_ns,
-        )
-        if not profile_ok:
-            errors.append(profile_msg)
+        # Serialize creation across parallel stack threads (see _CM_CREATE_LOCK).
+        with _CM_CREATE_LOCK:
+            profile_ok, profile_msg = self._create_profiles_configmap(
+                context, cmd, harness_name, harness_ns,
+            )
+            if not profile_ok:
+                errors.append(profile_msg)
 
-        scripts_ok, scripts_msg = self._create_harness_scripts_configmap(
-            context, cmd, harness_ns,
-        )
-        if not scripts_ok:
-            errors.append(scripts_msg)
+            scripts_ok, scripts_msg = self._create_harness_scripts_configmap(
+                context, cmd, harness_ns,
+            )
+            if not scripts_ok:
+                errors.append(scripts_msg)
 
         if errors:
             return StepResult(

@@ -203,3 +203,11 @@ def add_subcommands(
         action="store_true",
         help="Generate a run config YAML from current settings and exit.",
     )
+    run_parser.add_argument(
+        "--parallel",
+        type=int,
+        default=env_int("LLMDBENCH_PARALLEL", 1),
+        help="Max number of stacks to drive load against in parallel "
+        "(default: 1, sequential). Set >1 to run multiple models' "
+        "harness pods simultaneously from one run.",
+    )
