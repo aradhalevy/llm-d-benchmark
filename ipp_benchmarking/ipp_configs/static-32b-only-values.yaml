@@ -1,0 +1,31 @@
+# Single-model baseline: ONLY Qwen3-32B registered (listModels) -> every request has one
+# candidate, so there is no routing choice. Install this, then drive half_32b.yaml (32B-pinned,
+# half conc) as the static 32B leg. No scorer needed with a single candidate.
+payloadProcessor:
+  listModels:
+    - Qwen/Qwen3-32B
+  customConfig:
+    plugins:
+    - type: body-field-to-header
+      parameters:
+        fieldName: model
+        headerName: X-Gateway-Model-Name
+    - type: base-model-to-header
+    - type: model-selector
+    - type: model-name-filter
+    - type: max-score-picker
+    - type: model-config-datasource
+      parameters:
+        modelsPath: /config/models.json
+    profiles:
+    - name: default
+      plugins:
+        request:
+        - pluginRef: model-selector
+        - pluginRef: model-name-filter
+        - pluginRef: max-score-picker
+        - pluginRef: body-field-to-header
+        - pluginRef: base-model-to-header
+    datalayer:
+      datasources:
+      - pluginRef: model-config-datasource

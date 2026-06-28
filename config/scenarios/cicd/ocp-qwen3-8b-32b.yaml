@@ -107,7 +107,7 @@ shared:
       # multi-attach stall); ibm-spectrum-scale-fileset supports ReadWriteMany.
       accessModes:
         - ReadWriteMany
-      size: 10Gi
+      size: 30Gi
 
   harness:
     name: inference-perf

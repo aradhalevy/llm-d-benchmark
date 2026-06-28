@@ -47,34 +47,35 @@ helm uninstall payload-processor -n llmdbench                 # IPP isn't torn d
 
 ---
 
-## OpenShift A/B: smart routing vs random (ocp-qwen3-8b-32b)
+## OpenShift A/B: smart routing vs static single-model baselines (ocp-qwen3-8b-32b)
 
-**One workload, two models.** A single **summarizer** harness offers *both*
-models on every request — a JSON **string-array** `model_name`
-(`'["Qwen/Qwen3-8B","Qwen/Qwen3-32B"]'`) means "IPP, pick one". The 8B is the
-fast default; the 32B sits idle until the 8B saturates. Ramp C=100→500 (6000
-reqs). The **A/B delta is only the IPP config** — same workload, same models:
+**One script, one run at a time.** `tools/ab_routing_run.sh <arm> <ipp_values_file>
+[profile]` runs exactly one thing per invocation — it patches the values file's
+routing config into the IPP, restarts, runs the given profile (no planner, so the
+decision log is clean), warms the backend(s), then collects logs + the slim extract +
+routing analysis. The A/B is three such runs:
 
-- **smart** (`blog-ocp-ttft-only-values.yaml`): `avg-ttft-scorer` +
-  `max-score-picker` — keeps most traffic on the fast 8B and offloads only the
-  overflow to the 32B as load climbs (8B share 80%, 32B 20%, rising with
-  concurrency).
-- **random** (`maxscore-baseline-values.yaml`): `max-score-picker`, no scorer —
-  ties break randomly, so it acts as a random picker: a load-blind **~50/50**
-  split that floods the 32B from the start.
+- **static baselines** — register **only one model** (the values file's `listModels`
+  has a single entry, so there is no routing choice) and drive its **half-conc**
+  profile. `static-8b-only-values.yaml` + `half_8b.yaml` and
+  `static-32b-only-values.yaml` + `half_32b.yaml`, each C=25→275→25 so that
+  **8B@C/2 + 32B@C/2 sums to the smart run's full C**. The static split has no spill
+  path: when the 8B leg saturates there is nowhere to offload.
+- **smart** (`median-ttft-ocp-values.yaml`, **both** models registered, **no**
+  `model-name-filter` so `sweep_8stage`'s single-string `model_name` lets the
+  model-selector pick from both `listModels`): `median-ttft-scorer` (PR #188 —
+  predicts per-request TTFT under load via the `ttft-percentile-extractor` and
+  routes to the lowest predicted TTFT) + `max-score-picker` keeps most traffic on
+  the fast 8B and offloads overflow to the 32B as load climbs. Drives the full
+  `sweep_8stage.yaml` (C=50→550→50, 11 stages, ~43k reqs, ~5 min/stage; the
+  symmetric up/down legs expose routing hysteresis). Needs an IPP image built with
+  PR #188 (set its tag in step 2). For the avg-ttft scorer instead, swap in
+  `avgttft-ocp-values.yaml` (also no filter).
 
 All timeouts are lifted (route + client `request_timeout` to 1200s, ext-proc
 `messageTimeout` to 1200s) so nothing is shed — the delta is latency/throughput,
-not failures.
-
-Result ([`example_outputs/ocp-timeout-sweep-50-550/`](./example_outputs/ocp-timeout-sweep-50-550/)):
-smart keeps **85–96%** on the fast 8B (random ~50/50) → **~5× lower p95** and
-**~3–4× throughput**, 0 failures either arm.
-
-One script per arm (`tools/ab_routing_run.sh <arm> <ipp_config>`) swaps the IPP
-config + restarts, runs the summarizer harness (no planner, so the IPP decision
-log is clean), warms both backends, then collects logs + the slim extract +
-routing analysis.
+not failures. Smart keeps **85–96%** of load on the fast 8B and spills overflow
+to the 32B; the static split cannot.
 
 ```bash
 # Prereqs: OCP cluster w/ H100-80GB, `oc login`, HF_TOKEN with Qwen access,
@@ -86,11 +87,12 @@ export IPP_PATH=/path/to/llm-d-inference-payload-processor
 #    32B decode deploy after standup or it crash-loops.)
 llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 
-# 2. Install IPP with the smart (avg-ttft) values; ab_routing_run.sh swaps the
-#    config per arm afterwards.
+# 2. Install IPP. `VALUES` selects which model(s) are REGISTERED (listModels): the
+#    single-model baselines register one model, the smart run registers both. Re-run
+#    this same helm upgrade with the matching values file before each phase below.
+VALUES=ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
-  -n "$NAMESPACE" --set provider.name=istio \
-  -f ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml \
+  -n "$NAMESPACE" --set provider.name=istio -f "$VALUES" \
   --set payloadProcessor.image.registry=ghcr.io/<you> --set payloadProcessor.image.tag=<tag> \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=1200s
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
@@ -106,23 +108,29 @@ done
 # 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO (repo path), NS
 #    (namespace), GW (in-cluster gateway URL — embeds the namespace).
 
-# 4. Run each arm (one per invocation). The 2nd arg is the IPP values file; the
-#    script patches its customConfig into the cm + restarts IPP for that arm.
-ipp_benchmarking/tools/ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
-ipp_benchmarking/tools/ab_routing_run.sh random ipp_benchmarking/ipp_configs/maxscore-baseline-values.yaml
+# 4. Run ONE thing at a time. Before each line, re-run step 2's helm upgrade with the
+#    matching VALUES so the IPP registers the right model(s); 3rd arg = profile.
+#    Single-model baselines first (each registers one model -> no routing choice):
+ipp_benchmarking/tools/ab_routing_run.sh static_8b  ipp_benchmarking/ipp_configs/static-8b-only-values.yaml  half_8b.yaml
+ipp_benchmarking/tools/ab_routing_run.sh static_32b ipp_benchmarking/ipp_configs/static-32b-only-values.yaml half_32b.yaml
+#    Then smart routing across both (profile defaults to sweep_8stage.yaml):
+ipp_benchmarking/tools/ab_routing_run.sh smart      ipp_benchmarking/ipp_configs/median-ttft-ocp-values.yaml
 
 # 5. Plot (exact usage is in each script's docstring header). Run plotters with
 #    the venv python — they need matplotlib/numpy: `source .venv/bin/activate` (or
 #    prefix `.venv/bin/python3`). ab_routing_run.sh already built each arm's inputs:
 #    per_request_slim.json (latency plotter) + decisions_*.log (routing plotter).
+#    The static legs ran at HALF conc (25→275→25) but correspond to the smart run's
+#    full C (8B@25 == full C=50), so label all runs with the same full-equivalent list.
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
-.venv/bin/python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/routing_vs_concurrency_ab.png
-.venv/bin/python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "random"=$D/random --concurrencies 100,200,300,400,500 -o $D/latency_vs_concurrency_ab.png
+.venv/bin/python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart --concurrencies 50,150,250,350,450,550,450,350,250,150,50 -o $D/routing_vs_concurrency_ab.png
+.venv/bin/python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "static_8b"=$D/static_8b "static_32b"=$D/static_32b --concurrencies 50,150,250,350,450,550,450,350,250,150,50 -o $D/latency_vs_concurrency_ab.png
 ```
 
 `ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`
-(a re-run overwrites the committed sample). Both arms drive the same
-`summarization_concurrency_8b32b.yaml` profile — only the IPP config changes.
+(a re-run overwrites the committed sample). The smart run drives `sweep_8stage.yaml`;
+the static baselines drive `half_8b.yaml` / `half_32b.yaml` — the IPP config + the
+registered model(s) are what change between runs.
 
 **Plotting a plain `llmdbenchmark run`** (not via `ab_routing_run.sh`): the raw
 `per_request_lifecycle_metrics.json` is 100MB–1GB and often truncated, so build the

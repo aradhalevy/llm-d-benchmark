@@ -1,0 +1,38 @@
+# 32B-pinned arm of the static split (2-pod). Single model Qwen3-32B, HALF
+# concurrency (25->275->25) -- so 8B@C/2 + 32B@C/2 aggregates to the smart run's
+# full C. num_requests sized for ~5 min/stage from measured 2-pod 32B throughput
+# at half conc (num = round(300s x req/s); ~3 req/s saturated).
+load:
+  type: concurrent
+  interval: 30
+  request_timeout: 1200
+  stages:
+  - {concurrency_level: 25,  num_requests: 650}
+  - {concurrency_level: 75,  num_requests: 1000}
+  - {concurrency_level: 125, num_requests: 950}
+  - {concurrency_level: 175, num_requests: 900}
+  - {concurrency_level: 225, num_requests: 900}
+  - {concurrency_level: 275, num_requests: 900}
+  - {concurrency_level: 225, num_requests: 900}
+  - {concurrency_level: 175, num_requests: 900}
+  - {concurrency_level: 125, num_requests: 950}
+  - {concurrency_level: 75,  num_requests: 1000}
+  - {concurrency_level: 25,  num_requests: 650}
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: "Qwen/Qwen3-32B"
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: Qwen/Qwen3-32B
+data:
+  type: random
+  input_distribution:  {min: 1024, max: 4096, mean: 2048, std_dev: 512, total_count: 200}
+  output_distribution: {min: 128,  max: 512,  mean: 256,  std_dev: 64,  total_count: 200}
+report:
+  request_lifecycle: {summary: true, per_stage: true, per_request: true}
+storage:
+  local_storage: {path: /workspace}

@@ -1,0 +1,48 @@
+# IPP helm values: avg-ttft scorer (arm B of the A/B/C comparison).
+# avg-ttft-scorer (EMA of observed TTFT per model) + max-score-picker, NO filter,
+# listModels = BOTH (model-selector takes candidates from listModels). Reads the
+# request-metadata datalayer. Image :tracechunk = avg-ttft build with response-chunk
+# logging at TRACE (avoids the PVC log flood at --v=4).
+provider:
+  name: istio
+inferenceGateway:
+  name: infra-llmdbench-inference-gateway
+payloadProcessor:
+  image:
+    registry: ghcr.io/aradhalevy
+    tag: tracechunk           # avg-ttft build, reduced logs
+    pullPolicy: Always
+  flags:
+    v: 4                          # log per-model avg-ttft score
+  listModels:
+    - Qwen/Qwen3-8B
+    - Qwen/Qwen3-32B
+  customConfig:
+    plugins:
+    - type: body-field-to-header
+      parameters:
+        fieldName: model
+        headerName: X-Gateway-Model-Name
+    - type: base-model-to-header
+    - type: model-selector        # no model-name-filter; model-selector parses the array
+    - type: avg-ttft-scorer
+    - type: max-score-picker
+    - type: request-metadata-extractor
+    - type: model-config-datasource
+      parameters:
+        modelsPath: /config/models.json
+    profiles:
+    - name: default
+      plugins:
+        request:
+        - pluginRef: model-selector
+        - pluginRef: avg-ttft-scorer
+          weight: 1.0
+        - pluginRef: max-score-picker
+        - pluginRef: body-field-to-header
+        - pluginRef: base-model-to-header
+    datalayer:
+      extractors:
+      - pluginRef: request-metadata-extractor
+      datasources:
+      - pluginRef: model-config-datasource

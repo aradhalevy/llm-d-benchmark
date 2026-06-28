@@ -76,7 +76,7 @@ shared:
     workloadPvc:
       accessModes:
         - ReadWriteMany
-      size: 10Gi
+      size: 30Gi
   harness:
     name: inference-perf
     experimentProfile: summarization_concurrency_8b32b.yaml

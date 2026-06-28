@@ -1,0 +1,45 @@
+# IPP helm values: median-ttft scorer (PR #188, llm-d/llm-d-inference-payload-processor)
+# on ocp-qwen3-8b-32b. Predicts per-request TTFT under current load via the
+# ttft-percentile-extractor datalayer (P10Low floor + P50/inflightAtP50 slope)
+# and routes to the lowest predicted TTFT. Qwen set only (never facebook/opt-*).
+payloadProcessor:
+  listModels:
+    - Qwen/Qwen3-8B
+    - Qwen/Qwen3-32B
+  customConfig:
+    plugins:
+    - type: body-field-to-header
+      parameters:
+        fieldName: model
+        headerName: X-Gateway-Model-Name
+    - type: base-model-to-header
+    - type: model-selector
+    - type: median-ttft-scorer
+      # effectiveTTFT = P10Low + inflight x (P50 - P10Low) / inflightAtP50
+    - type: max-score-picker
+    - type: ttft-percentile-extractor
+      parameters:
+        intervalDuration: 1s
+        windowSize: 5000
+        windowAge: 1m
+        minObservations: 3
+        inflightEmaAlpha: 0.2
+        lowLoadWindowAge: 1h
+    - type: model-config-datasource
+      parameters:
+        modelsPath: /config/models.json
+    profiles:
+    - name: default
+      plugins:
+        request:
+        - pluginRef: model-selector
+        - pluginRef: median-ttft-scorer
+          weight: 1.0
+        - pluginRef: max-score-picker
+        - pluginRef: body-field-to-header
+        - pluginRef: base-model-to-header
+    datalayer:
+      extractors:
+      - pluginRef: ttft-percentile-extractor
+      datasources:
+      - pluginRef: model-config-datasource

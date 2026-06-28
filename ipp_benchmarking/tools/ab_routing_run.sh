@@ -5,15 +5,18 @@
 # The 2nd arg is an IPP helm VALUES file; we patch its .payloadProcessor.customConfig
 # subtree into the payload-processor ConfigMap + restart (helm upgrade conflicts with the
 # kubectl-patched deployment on this cluster, so we touch only the cm).
-#   ab_routing_run.sh <arm_name> <ipp_values_file>
-# e.g. ab_routing_run.sh smart  ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
-#      ab_routing_run.sh random ipp_benchmarking/ipp_configs/maxscore-baseline-values.yaml
+#   ab_routing_run.sh <arm_name> <ipp_values_file> [profile=sweep_8stage.yaml]
+# Runs ONE thing per invocation. Single-model baselines first (each run uses a values
+# file whose listModels registers only ONE model in the IPP, driven by its half-conc
+# profile), then the smart routing run over both:
+#   ab_routing_run.sh static_8b  ipp_benchmarking/ipp_configs/static-8b-only-values.yaml  half_8b.yaml
+#   ab_routing_run.sh static_32b ipp_benchmarking/ipp_configs/static-32b-only-values.yaml half_32b.yaml
+#   ab_routing_run.sh smart      ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
 set -u
-ARM="${1:?arm}"; CFG="${2:?ipp values file}"
+ARM="${1:?arm}"; CFG="${2:?ipp values file}"; PROFILE="${3:-sweep_8stage.yaml}"
 REPO=/home/arad/new_git_repos/new_benchmark/llm-d-benchmark
 NS=llm-d-arad; DAP=access-to-harness-data-workload-pvc
 GW=http://infra-llmdbench-inference-gateway-istio.llm-d-arad.svc.cluster.local:80
-PROFILE=summarization_concurrency_8b32b.yaml
 DEST=$REPO/ipp_benchmarking/example_outputs/ocp-research-agent-routing/$ARM
 OCD=$DEST/oc-logs; STOP=/tmp/abr_${ARM}_stop
 cd "$REPO"; source .venv/bin/activate 2>/dev/null; source .env 2>/dev/null
@@ -60,8 +63,10 @@ WSTOP=/tmp/abr_${ARM}_warmstop; rm -f "$WSTOP"
   done ) & WARM=$!
 echo "both-backend warm trickle=$WARM"
 for i in $(seq 1 72); do
-  n=$(oc logs -n $NS "$POD" --since=15s 2>/dev/null | grep '"msg":"Model selected"' | grep -c 'Qwen3-8B')
-  [ "${n:-0}" -ge 60 ] && { echo "summarizer load up ($n/15s) -> stop warm"; break; }
+  # ponytail: count picks of ANY model (not just 8B) so a single-model baseline run
+  # also detects "load is up"; threshold 20/15s = real load started for either pool.
+  n=$(oc logs -n $NS "$POD" --since=15s 2>/dev/null | grep -c '"msg":"Model selected"')
+  [ "${n:-0}" -ge 20 ] && { echo "load up ($n picks/15s) -> stop warm"; break; }
   kill -0 "$SUMM" 2>/dev/null || break; sleep 5
 done
 touch "$WSTOP"; pkill -P $WARM 2>/dev/null; kill $WARM 2>/dev/null
