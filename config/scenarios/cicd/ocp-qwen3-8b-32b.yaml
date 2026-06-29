@@ -136,9 +136,6 @@ scenario:
   # --------------------------------------------------------------------------
   - name: "qwen3-8b"
 
-    harness:
-      experimentProfile: sync_8b.yaml    # per-stack pinned profile (model_name=Qwen/Qwen3-8B)
-
     model:
       name: Qwen/Qwen3-8B
       shortName: qwen-qwen3-8b
@@ -173,9 +170,6 @@ scenario:
   # --------------------------------------------------------------------------
   - name: "qwen3-32b"
 
-    harness:
-      experimentProfile: sync_32b.yaml   # per-stack pinned profile (model_name=Qwen/Qwen3-32B)
-
     model:
       name: Qwen/Qwen3-32B
       shortName: qwen-qwen3-32b
@@ -192,7 +186,7 @@ scenario:
         baseModel: "Qwen/Qwen3-32B"
 
     decode:
-      replicas: 1
+      replicas: 2
       resources:
         limits:
           memory: 80Gi

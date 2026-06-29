@@ -108,13 +108,25 @@ done
 # 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO (repo path), NS
 #    (namespace), GW (in-cluster gateway URL — embeds the namespace).
 
-# 4. Run ONE thing at a time. Before each line, re-run step 2's helm upgrade with the
-#    matching VALUES so the IPP registers the right model(s); 3rd arg = profile.
+# 4. Run ONE arm at a time. Each block below is a SINGLE command (note the trailing
+#    backslashes) with three positional args:
+#        ab_routing_run.sh  <arm>  <ipp_values_file>  <profile>
+#    Before each, re-run step 2's helm upgrade with the matching VALUES so the IPP
+#    registers the right model(s).
 #    Single-model baselines first (each registers one model -> no routing choice):
-ipp_benchmarking/tools/ab_routing_run.sh static_8b  ipp_benchmarking/ipp_configs/static-8b-only-values.yaml  half_8b.yaml
-ipp_benchmarking/tools/ab_routing_run.sh static_32b ipp_benchmarking/ipp_configs/static-32b-only-values.yaml half_32b.yaml
-#    Then smart routing across both (profile defaults to sweep_8stage.yaml):
-ipp_benchmarking/tools/ab_routing_run.sh smart      ipp_benchmarking/ipp_configs/median-ttft-ocp-values.yaml
+ipp_benchmarking/tools/ab_routing_run.sh \
+    static_8b \
+    ipp_benchmarking/ipp_configs/static-8b-only-values.yaml \
+    half_8b.yaml
+ipp_benchmarking/tools/ab_routing_run.sh \
+    static_32b \
+    ipp_benchmarking/ipp_configs/static-32b-only-values.yaml \
+    half_32b.yaml
+#    Then smart routing across both (pass the full sweep profile explicitly):
+ipp_benchmarking/tools/ab_routing_run.sh \
+    smart \
+    ipp_benchmarking/ipp_configs/median-ttft-ocp-values.yaml \
+    sweep_8stage.yaml
 
 # 5. Plot (exact usage is in each script's docstring header). Run plotters with
 #    the venv python — they need matplotlib/numpy: `source .venv/bin/activate` (or
@@ -141,4 +153,20 @@ the IPP decision log, which only `ab_routing_run.sh` captures):
 .venv/bin/python3 ipp_benchmarking/tools/extract_per_request_slim.py \
   <results>/.../per_request_lifecycle_metrics.json  <arm_dir>/per_request_slim.json
 # -> "<n> records  8B=<x> 32B=<y> fail=<z>"; then point the latency plotter at <arm_dir>
+```
+
+### OpenShift: decode pods crash with `getpwuid(): uid not found`
+
+OpenShift runs the vLLM container under an arbitrary high UID (the namespace's
+range) that isn't in `/etc/passwd`, so torch's inductor cache setup calls
+`getpass.getuser()` -> `pwd.getpwuid()` and dies with
+`KeyError: getpwuid(): uid not found`. Give `getuser()` a name via the
+environment so it skips the passwd lookup -- patch every decode deployment
+after standup:
+
+```bash
+for d in $(oc get deploy -n "$NAMESPACE" -o name | grep decode); do
+  oc patch "$d" -n "$NAMESPACE" -p \
+    '{"spec":{"template":{"spec":{"containers":[{"name":"vllm","env":[{"name":"USER","value":"vllm"},{"name":"LOGNAME","value":"vllm"}]}]}}}}'
+done
 ```

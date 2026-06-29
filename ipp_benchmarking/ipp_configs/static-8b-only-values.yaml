@@ -13,7 +13,17 @@ payloadProcessor:
     - type: base-model-to-header
     - type: model-selector
     - type: model-name-filter
+    - type: median-ttft-scorer
+      # effectiveTTFT = P10Low + inflight x (P50 - P10Low) / inflightAtP50
     - type: max-score-picker
+    - type: ttft-percentile-extractor
+      parameters:
+        intervalDuration: 1s
+        windowSize: 5000
+        windowAge: 1m
+        minObservations: 3
+        inflightEmaAlpha: 0.2
+        lowLoadWindowAge: 1h
     - type: model-config-datasource
       parameters:
         modelsPath: /config/models.json
@@ -23,6 +33,8 @@ payloadProcessor:
         request:
         - pluginRef: model-selector
         - pluginRef: model-name-filter
+        - pluginRef: median-ttft-scorer
+          weight: 1.0
         - pluginRef: max-score-picker
         - pluginRef: body-field-to-header
         - pluginRef: base-model-to-header

@@ -1,32 +1,20 @@
 #!/bin/bash
-# Routing-only A/B: SMART (avg-ttft scorer) vs RANDOM (random-picker -> 50/50).
-# Summarizer ONLY (no planner) -> the IPP decision log is uncontaminated, so per-stage picker
-# routing is clean. One arm per invocation; swap the IPP config between arms.
-# The 2nd arg is an IPP helm VALUES file; we patch its .payloadProcessor.customConfig
-# subtree into the payload-processor ConfigMap + restart (helm upgrade conflicts with the
-# kubectl-patched deployment on this cluster, so we touch only the cm).
-#   ab_routing_run.sh <arm_name> <ipp_values_file> [profile=sweep_8stage.yaml]
-# Runs ONE thing per invocation. Single-model baselines first (each run uses a values
-# file whose listModels registers only ONE model in the IPP, driven by its half-conc
-# profile), then the smart routing run over both:
-#   ab_routing_run.sh static_8b  ipp_benchmarking/ipp_configs/static-8b-only-values.yaml  half_8b.yaml
-#   ab_routing_run.sh static_32b ipp_benchmarking/ipp_configs/static-32b-only-values.yaml half_32b.yaml
-#   ab_routing_run.sh smart      ipp_benchmarking/ipp_configs/blog-ocp-ttft-only-values.yaml
+# Routing A/B: median-TTFT scorer (smart) vs single-model runs. One arm/invocation.
+# Configure the IPP for the arm per the README (helm upgrade -f <values>) first.
+#   ab_routing_run.sh <arm> <ipp_values_file> [profile=half_8b.yaml]
 set -u
-ARM="${1:?arm}"; CFG="${2:?ipp values file}"; PROFILE="${3:-sweep_8stage.yaml}"
-REPO=/home/arad/new_git_repos/new_benchmark/llm-d-benchmark
+ARM="${1:?arm}"; CFG="${2:?ipp values file}"; PROFILE="${3:-half_8b.yaml}"
+REPO=/home/arad/new_git_repos/benchmark_try/llm-d-benchmark
 NS=llm-d-arad; DAP=access-to-harness-data-workload-pvc
-GW=http://infra-llmdbench-inference-gateway-istio.llm-d-arad.svc.cluster.local:80
-DEST=$REPO/ipp_benchmarking/example_outputs/ocp-research-agent-routing/$ARM
+GW=http://infra-llmdbench-inference-gateway-istio.$NS.svc.cluster.local:80
+D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
+DEST=$REPO/$D/$ARM
 OCD=$DEST/oc-logs; STOP=/tmp/abr_${ARM}_stop
 cd "$REPO"; source .venv/bin/activate 2>/dev/null; source .env 2>/dev/null
 mkdir -p "$DEST/live-snapshots" "$OCD"
 rm -f "$STOP"; : > "$DEST/decisions_rolling.log"; : > "$DEST/decisions_follow.log"
 
-# 1. set the IPP config for this arm (customConfig subtree of the values file) + restart
-oc patch cm payload-processor -n $NS --type merge -p "$(python3 -c "import json,yaml;cc=yaml.safe_load(open('$CFG'))['payloadProcessor']['customConfig'];print(json.dumps({'data':{'custom-ipp-config.yaml':yaml.safe_dump(cc,sort_keys=False)}}))")"
-oc rollout restart deploy/payload-processor -n $NS
-oc rollout status deploy/payload-processor -n $NS --timeout=120s
+# 1. IPP must already be configured for this arm (helm upgrade -f $CFG), per the README.
 # No timeouts: lift the per-route 30s request timeout (the sole load-shedder) so requests
 # complete instead of recording 504s. Survives across runs; re-applied per arm to be safe.
 for r in $(oc get httproute -n $NS -o name | grep -E 'qwen3-(8b|32b)'); do
