@@ -178,9 +178,9 @@ dead backend. Check `kubectl get deploy` replicas before every run and
 **No HTTPRoutes after standup.** IPP routes by the `X-Gateway-Base-Model-Name`
 header, which the default PathPrefix route can't express, so the scenario sets
 `httpRoute.enabled: false` and `08_httproute.yaml` renders nothing — the gateway
-404s everything until header-match routes exist. Apply them by hand after
-standup: `kubectl apply -f ipp_configs/qwen-httproutes.yaml` (adjust the
-namespace + the hashed InferencePool names to match `kubectl get inferencepool`).
+404s everything until header-match routes exist. Generate and apply them after
+standup: `tools/gen_httproutes.sh "$NAMESPACE" | kubectl apply -f -` (pool names
+are derived from the namespace + model, so nothing to hand-edit).
 
 **Scenario `model.size` is the decode pod's emptyDir limit — undersizing it
 is an eviction loop.** The `model-storage` emptyDir's `sizeLimit` comes from

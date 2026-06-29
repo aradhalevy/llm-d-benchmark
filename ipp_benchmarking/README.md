@@ -101,8 +101,8 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
                               -f ipp_benchmarking/ipp_configs/qwen3-32b-base-model.yaml
 # Header-match routes (scenario sets httpRoute.enabled: false; standup renders none).
-# Edit the namespace + hashed InferencePool names to match `kubectl get inferencepool -n "$NAMESPACE"`.
-kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen-httproutes.yaml
+# Pool names are derived from $NAMESPACE -- no hand-editing.
+ipp_benchmarking/tools/gen_httproutes.sh "$NAMESPACE" | kubectl apply -f -
 
 # No timeouts: lift the per-route 30s request timeout (the sole load-shedder) so requests
 # complete instead of being shed. ab_routing_run.sh re-applies this per arm.
@@ -181,11 +181,10 @@ done
 
 IPP routes by the `X-Gateway-Base-Model-Name` header, which the default
 PathPrefix route can't express, so the scenario sets `httpRoute.enabled: false`
-and standup renders no route. Apply the header-match routes by hand (edit the
-namespace + the hashed InferencePool names to match `kubectl get inferencepool
--n "$NAMESPACE"` first):
+and standup renders no route. Generate the header-match routes (pool names are
+derived deterministically from the namespace + model, so nothing to hand-edit):
 
 ```bash
-kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen-httproutes.yaml
+ipp_benchmarking/tools/gen_httproutes.sh "$NAMESPACE" | kubectl apply -f -
 kubectl get httproute -n "$NAMESPACE"   # both routes should be Accepted/ResolvedRefs
 ```
