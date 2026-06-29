@@ -63,14 +63,14 @@ routing analysis. The A/B is three such runs:
   path: when the 8B leg saturates there is nowhere to offload.
 - **smart** (`median-ttft-ocp-values.yaml`, **both** models registered, **no**
   `model-name-filter` so `sweep_8stage`'s single-string `model_name` lets the
-  model-selector pick from both `listModels`): `median-ttft-scorer` (PR #188 —
-  predicts per-request TTFT under load via the `ttft-percentile-extractor` and
-  routes to the lowest predicted TTFT) + `max-score-picker` keeps most traffic on
-  the fast 8B and offloads overflow to the 32B as load climbs. Drives the full
-  `sweep_8stage.yaml` (C=50→550→50, 11 stages, ~43k reqs, ~5 min/stage; the
-  symmetric up/down legs expose routing hysteresis). Needs an IPP image built with
-  PR #188 (set its tag in step 2). For the avg-ttft scorer instead, swap in
-  `avgttft-ocp-values.yaml` (also no filter).
+  model-selector pick from both `listModels`): `queue-ttft-scorer` (predicts
+  per-request TTFT under load via the `ttft-percentile-extractor`, routes to the
+  lowest predicted TTFT, with `explorationRate: 0.1`) + `max-score-picker` keeps
+  most traffic on the fast 8B and offloads overflow to the 32B as load climbs.
+  Drives the full `sweep_8stage.yaml` (C=50→550→50, 11 stages, ~43k reqs,
+  ~5 min/stage; the symmetric up/down legs expose routing hysteresis). Needs an
+  IPP image built with the queue-ttft-scorer (set its tag in step 2). For the
+  avg-ttft scorer instead, swap in `avgttft-ocp-values.yaml` (also no filter).
 
 All timeouts are lifted (route + client `request_timeout` to 1200s, ext-proc
 `messageTimeout` to 1200s) so nothing is shed — the delta is latency/throughput,
@@ -90,13 +90,19 @@ llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 # 2. Install IPP. `VALUES` selects which model(s) are REGISTERED (listModels): the
 #    single-model baselines register one model, the smart run registers both. Re-run
 #    this same helm upgrade with the matching values file before each phase below.
-VALUES=ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values
+export VALUES=$IPP_PATH/ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" --set provider.name=istio -f "$VALUES" \
+   --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
+  --set provider.supportedEvents.responseBody=true
+    --set 'payloadProcessor.flags.v=4' \
   --set payloadProcessor.image.registry=ghcr.io/<you> --set payloadProcessor.image.tag=<tag> \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=1200s
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
                               -f ipp_benchmarking/ipp_configs/qwen3-32b-base-model.yaml
+# Header-match routes (scenario sets httpRoute.enabled: false; standup renders none).
+# Edit the namespace + hashed InferencePool names to match `kubectl get inferencepool -n "$NAMESPACE"`.
+kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen-httproutes.yaml
 
 # No timeouts: lift the per-route 30s request timeout (the sole load-shedder) so requests
 # complete instead of being shed. ab_routing_run.sh re-applies this per arm.
@@ -169,4 +175,17 @@ for d in $(oc get deploy -n "$NAMESPACE" -o name | grep decode); do
   oc patch "$d" -n "$NAMESPACE" -p \
     '{"spec":{"template":{"spec":{"containers":[{"name":"vllm","env":[{"name":"USER","value":"vllm"},{"name":"LOGNAME","value":"vllm"}]}]}}}}'
 done
+```
+
+### No HTTPRoutes after standup -> gateway 404s everything
+
+IPP routes by the `X-Gateway-Base-Model-Name` header, which the default
+PathPrefix route can't express, so the scenario sets `httpRoute.enabled: false`
+and standup renders no route. Apply the header-match routes by hand (edit the
+namespace + the hashed InferencePool names to match `kubectl get inferencepool
+-n "$NAMESPACE"` first):
+
+```bash
+kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen-httproutes.yaml
+kubectl get httproute -n "$NAMESPACE"   # both routes should be Accepted/ResolvedRefs
 ```

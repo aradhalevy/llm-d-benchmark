@@ -175,14 +175,12 @@ dead backend. Check `kubectl get deploy` replicas before every run and
 `kubectl scale deploy/<decode> --replicas=1` to restore; keep idle gaps under
 90 minutes during multi-hour sessions.
 
-**`experimentalHttpRoute` no longer exists in current llm-d-benchmark
-templates.** Older repo versions rendered per-pool header-match HTTPRoutes
-(X-Gateway-Base-Model-Name) from the scenario's
-`inferenceExtension.experimentalHttpRoute` — the current templates ignore
-that key entirely (08_httproute.yaml renders empty when `httpRoute.enabled:
-false`), so the gateway 404s everything. Apply the routes explicitly after
-standup: `ipp_configs/qwen-gemma-httproutes.yaml` (adjust the hashed
-InferencePool names).
+**No HTTPRoutes after standup.** IPP routes by the `X-Gateway-Base-Model-Name`
+header, which the default PathPrefix route can't express, so the scenario sets
+`httpRoute.enabled: false` and `08_httproute.yaml` renders nothing — the gateway
+404s everything until header-match routes exist. Apply them by hand after
+standup: `kubectl apply -f ipp_configs/qwen-httproutes.yaml` (adjust the
+namespace + the hashed InferencePool names to match `kubectl get inferencepool`).
 
 **Scenario `model.size` is the decode pod's emptyDir limit — undersizing it
 is an eviction loop.** The `model-storage` emptyDir's `sizeLimit` comes from

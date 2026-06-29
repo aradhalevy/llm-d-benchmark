@@ -1,0 +1,55 @@
+# Header-matched HTTPRoutes (manual IPP data-path artifact; scenario sets
+# httpRoute.enabled: false). IPP injects X-Gateway-Base-Model-Name from the
+# *-base-model ConfigMaps; these routes map that header to each InferencePool.
+# Re-apply after standup/teardown alongside the base-model ConfigMaps.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen3-8b-route
+  namespace: llm-d-arad
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: infra-llmdbench-inference-gateway
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: X-Gateway-Base-Model-Name
+              value: Qwen/Qwen3-8B
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: qwen-qwe-1a17ef6e-qwen3-8b-router
+          port: 8000
+          weight: 1
+      timeouts:
+        backendRequest: 0s
+        request: 0s
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen3-32b-route
+  namespace: llm-d-arad
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: infra-llmdbench-inference-gateway
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: X-Gateway-Base-Model-Name
+              value: Qwen/Qwen3-32B
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: qwen-qwe-de682216-wen3-32b-router
+          port: 8000
+          weight: 1
+      timeouts:
+        backendRequest: 0s
+        request: 0s
