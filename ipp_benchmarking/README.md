@@ -52,8 +52,10 @@ helm uninstall payload-processor -n llmdbench                 # IPP isn't torn d
 **One script, one run at a time.** `tools/ab_routing_run.sh <arm> <ipp_values_file>
 [profile]` runs exactly one thing per invocation — it patches the values file's
 routing config into the IPP, restarts, runs the given profile (no planner, so the
-decision log is clean), warms the backend(s), then collects logs + the slim extract +
-routing analysis. The A/B is three such runs:
+decision log is clean), streams the **full IPP log** live to `ipp-full-live.log`
+(so per-request predicted/actual TTFT survives the kubelet's container-log
+rotation, which at `v=4` under load drops early stages within minutes), then
+collects logs + the slim extract + routing analysis. The A/B is three such runs:
 
 - **static baselines** — register **only one model** (the values file's `listModels`
   has a single entry, so there is no routing choice) and drive its **half-conc**
