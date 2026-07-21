@@ -37,7 +37,14 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
   --set 'payloadProcessor.listModels[0]=facebook/opt-125m' --set 'payloadProcessor.listModels[1]=facebook/opt-350m'
 kubectl apply -n llmdbench -f ipp_benchmarking/ipp_configs/opt-125m-base-model.yaml \
                            -f ipp_benchmarking/ipp_configs/opt-350m-base-model.yaml
-# give the sims different TTFT/ITL so routing has something to optimize — see AGENTS.md.
+# give the sims different TTFT/ITL so routing has something to optimize (opt-125m slow,
+# opt-350m fast). Not in the scenario (modelCommand=imageDefault) -> re-apply after a fresh
+# standup. Rebuilds container 0's args from the model name (deploy names vary per standup):
+for d in $(kubectl get deploy -n llmdbench -o name | grep decode); do
+  m=$(kubectl get $d -n llmdbench -o jsonpath='{.spec.template.spec.containers[0].args[1]}')
+  case $m in *125m*) t=3s i=200ms;; *) t=1s i=50ms;; esac
+  kubectl patch $d -n llmdbench --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":[\"--model\",\"$m\",\"--port\",\"8200\",\"--served-model-name\",\"$m\",\"--time-to-first-token=$t\",\"--inter-token-latency=$i\",\"--max-num-seqs=10\"]}]"
+done
 
 llmdbenchmark --spec cicd/kind-sim-multi run -l inference-perf -w sanity_random.yaml
 NAMESPACE=llmdbench ./ipp_benchmarking/collect_logs.sh        # -> ./collected-logs-<N>/
@@ -55,7 +62,7 @@ routing config into the IPP, restarts, runs the given profile (no planner, so th
 decision log is clean), streams the **full IPP log** live to `ipp-full-live.log`
 (so per-request predicted/actual TTFT survives the kubelet's container-log
 rotation, which at `v=4` under load drops early stages within minutes), then
-collects logs + the slim extract + routing analysis. The A/B is three such runs:
+collects logs + the slim extract. The A/B is three such runs:
 
 - **static baselines** — register **only one model** (the values file's `listModels`
   has a single entry, so there is no routing choice) and drive its **half-conc**
@@ -92,26 +99,20 @@ llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 # 2. Install IPP. `VALUES` selects which model(s) are REGISTERED (listModels): the
 #    single-model baselines register one model, the smart run registers both. Re-run
 #    this same helm upgrade with the matching values file before each phase below.
-export VALUES=$IPP_PATH/ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values
+export VALUES=$IPP_PATH/ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values; static-both-filter for concurrent 8B+32B
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" --set provider.name=istio -f "$VALUES" \
    --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
   --set provider.supportedEvents.responseBody=true
     --set 'payloadProcessor.flags.v=4' \
-  --set payloadProcessor.image.registry=ghcr.io/<you> --set payloadProcessor.image.tag=<tag> \
+  --set payloadProcessor.image.registry=ghcr.io/aradhalevy --set payloadProcessor.image.tag=ttft-scorer \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=1200s
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
                               -f ipp_benchmarking/ipp_configs/qwen3-32b-base-model.yaml
+                              
 # Header-match routes (scenario sets httpRoute.enabled: false; standup renders none).
 # Pool names are derived from $NAMESPACE -- no hand-editing.
 ipp_benchmarking/tools/gen_httproutes.sh "$NAMESPACE" | kubectl apply -f -
-
-# No timeouts: lift the per-route 30s request timeout (the sole load-shedder) so requests
-# complete instead of being shed. ab_routing_run.sh re-applies this per arm.
-for r in $(kubectl get httproute -n "$NAMESPACE" -o name | grep -E 'qwen3-(8b|32b)'); do
-  kubectl patch "$r" -n "$NAMESPACE" --type=json \
-    -p='[{"op":"replace","path":"/spec/rules/0/timeouts/request","value":"1200s"}]'
-done
 
 # 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO (repo path), NS
 #    (namespace), GW (in-cluster gateway URL — embeds the namespace).
@@ -139,12 +140,25 @@ ipp_benchmarking/tools/ab_routing_run.sh \
 # 5. Plot (exact usage is in each script's docstring header). Run plotters with
 #    the venv python — they need matplotlib/numpy: `source .venv/bin/activate` (or
 #    prefix `.venv/bin/python3`). ab_routing_run.sh already built each arm's inputs:
-#    per_request_slim.json (latency plotter) + decisions_*.log (routing plotter).
+#    per_request_slim.json (latency plotter) + ipp-full-live.log (routing plotter; its
+#    "Model selected" lines also feed analyze_routing.py for an on-demand 8B/32B breakdown).
 #    The static legs ran at HALF conc (25→275→25) but correspond to the smart run's
 #    full C (8B@25 == full C=50), so label all runs with the same full-equivalent list.
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
 .venv/bin/python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_ocp.py "smart"=$D/smart --concurrencies 50,150,250,350,450,550,450,350,250,150,50 -o $D/routing_vs_concurrency_ab.png
 .venv/bin/python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_ocp.py "smart"=$D/smart "static_8b"=$D/static_8b "static_32b"=$D/static_32b --concurrencies 50,150,250,350,450,550,450,350,250,150,50 -o $D/latency_vs_concurrency_ab.png
+```
+
+**Predicted-vs-actual TTFT, one run.** Pass `<label>=<ipp log>`; point at the arm's
+**`ipp-full-live.log`** (the rotated `oc-logs/ipp-tail.log` only keeps the run's
+tail). Stage bands come from the arm's sibling `harness_stdout.log`. Besides the
+full-run PNG it writes one zoomed PNG per stage (stage ±100s, dense time ticks)
+into `<out>_stages/`. Default `--concurrencies` is the half-conc legs (25→275→25);
+override for the smart full sweep.
+
+```bash
+.venv/bin/python3 ipp_benchmarking/tools/plot_ttft_actual_vs_predicted.py \
+  "8b"=$D/static_8b/ipp-full-live.log -o $D/ttft_8b_fullrun.png
 ```
 
 `ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`
