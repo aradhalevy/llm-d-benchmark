@@ -11,6 +11,11 @@ scenarios/specs/profiles (e.g. `--spec cicd/ocp-qwen3-8b-32b`,
 `-w summarization_concurrency_8b32b.yaml`). `example_outputs/` ships sample plots
 + writeups only; raw run data is too large to commit.
 
+Two-model **adaptive routing** (Gemma-4-26B-FP8 vs Qwen3.6-35B-FP8, one shared
+`model:"auto"` stream routed by TTFT): see
+[`adaptive-routing-experiment.md`](./adaptive-routing-experiment.md) for the full
+runbook, the per-stage runner, and the per-image filter/plugin differences.
+
 ---
 
 ## Kind quick-start (simulator, no GPU)

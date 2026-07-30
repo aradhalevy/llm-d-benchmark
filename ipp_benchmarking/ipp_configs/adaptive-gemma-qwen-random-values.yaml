@@ -1,0 +1,68 @@
+# IPP helm values for the RANDOM-ROUTING BASELINE of the Gemma/Qwen adaptive experiment.
+# Identical to adaptive-gemma-qwen-smart-values.yaml except that ttft-aware-scorer is REMOVED, so
+# this is a clean ablation: same image, same filter, same picker, same everything -- only the
+# scoring signal is gone, and any difference in the results is attributable to the scorer alone.
+#
+# With no scorer every candidate keeps score 0, and max-score-picker shuffles before its stable
+# sort ("needed for random tie break when scores are equal", picker/maxscore/picker.go), so the
+# pick is UNIFORM RANDOM over the surviving candidates:
+#   "auto"                     -> both pools kept -> ~50/50 coin flip per request
+#   exact "<gemma>" / "<qwen>" -> filter leaves one candidate -> still pinned, unchanged
+# (random-picker would be equivalent here; keeping max-score-picker makes it a strict ablation.)
+#
+# ttft-percentile-extractor is DELIBERATELY KEPT even though nothing consumes its output: it emits
+# the "ttft-observation" line that carries per-request ttft_s, which is both the actual-TTFT source
+# and -- on this image, where the per-chunk lines are gone -- the end-of-stream marker the
+# per-request e2e derivation needs. It is a response-side attribute writer and does not influence
+# routing.
+provider:
+  supportedEvents:
+    requestTrailers: true
+    responseHeaders: true
+    responseBody: true
+payloadProcessor:
+  image:
+    # ghcr.io/mohammad-nassar10/llm-d-inference-payload-processor:ttft-aware-p25-expl
+    registry: ghcr.io/mohammad-nassar10
+    repository: llm-d-inference-payload-processor
+    tag: ttft-aware-p25-expl
+    pullPolicy: Always
+  listModels:
+    - RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
+    - Qwen/Qwen3.6-35B-A3B-FP8
+  customConfig:
+    plugins:
+    - type: body-field-to-header
+      parameters:
+        fieldName: model
+        headerName: X-Gateway-Model-Name
+    - type: base-model-to-header
+    - type: model-selector
+    - type: model-group-name-filter
+    - type: max-score-picker
+    - type: ttft-percentile-extractor
+      parameters:
+        intervalDuration: 1s
+        windowSize: 5000
+        maxObservationAge: 3m
+        maxRequests: 100
+        minRequests: 5
+        bucketDuration: 1m
+        bucketHistorySize: 720
+    - type: model-config-datasource
+      parameters:
+        modelsPath: /config/models.json
+    profiles:
+    - name: default
+      plugins:
+        request:
+        - pluginRef: model-selector
+        - pluginRef: model-group-name-filter
+        - pluginRef: max-score-picker
+        - pluginRef: body-field-to-header
+        - pluginRef: base-model-to-header
+    datalayer:
+      extractors:
+      - pluginRef: ttft-percentile-extractor
+      datasources:
+      - pluginRef: model-config-datasource
