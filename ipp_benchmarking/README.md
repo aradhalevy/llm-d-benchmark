@@ -40,6 +40,7 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
   --set provider.supportedEvents.responseBody=true --set provider.messageTimeout=1200s \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway \
   --set 'payloadProcessor.listModels[0]=facebook/opt-125m' --set 'payloadProcessor.listModels[1]=facebook/opt-350m'
+# listModels needs a chart that renders models.json -- see the note in the OCP section below
 kubectl apply -n llmdbench -f ipp_benchmarking/ipp_configs/opt-125m-base-model.yaml \
                            -f ipp_benchmarking/ipp_configs/opt-350m-base-model.yaml
 # give the sims different TTFT/ITL so routing has something to optimize (opt-125m slow,
@@ -104,6 +105,12 @@ llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 # 2. Install IPP. `VALUES` selects which model(s) are REGISTERED (listModels): the
 #    single-model baselines register one model, the smart run registers both. Re-run
 #    this same helm upgrade with the matching values file before each phase below.
+#    listModels only renders /config/models.json if $IPP_PATH's chart has the listModels
+#    block in templates/config.yaml (upstream main does NOT) -- without it the IPP
+#    crashloops on the missing file and the key has to be injected by hand:
+#      oc patch cm payload-processor -n "$NAMESPACE" --type=merge \
+#        -p '{"data":{"models.json":"{\"models\":[{\"name\":\"Qwen/Qwen3-8B\"},{\"name\":\"Qwen/Qwen3-32B\"}]}"}}'
+#      oc rollout restart deploy/payload-processor -n "$NAMESPACE"
 export VALUES=$IPP_PATH/ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values; static-both-filter for concurrent 8B+32B
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" --set provider.name=istio -f "$VALUES" \
