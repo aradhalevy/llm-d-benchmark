@@ -118,7 +118,7 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
 oc rollout restart deploy/payload-processor -n "$NAMESPACE"
 oc rollout status  deploy/payload-processor -n "$NAMESPACE" --timeout=180s
 
-# 3. Base-model ConfigMaps (feed /config/models.json).
+# 3. Base-model ConfigMaps (feed X-Gateway-Base-Model-Name; NOT /config/models.json).
 oc apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/gemma-26b-base-model.yaml \
                          -f ipp_benchmarking/ipp_configs/qwen36-35b-base-model.yaml
 
@@ -237,10 +237,10 @@ print(c)"        # all-zero RecentN => blind; add session-affinity (see Gotchas)
 - **IPP registration is mandatory** — without both models registered + `model-group-name-filter`,
   every request dies at `no models available after filtering`.
 - **`models.json` may be wiped on helm upgrade** — if the IPP crashloops, re-inject and restart
-  (`oc patch cm payload-processor … models.json …`).
+  (patch command in `README.md`, OCP step 2).
 - **Sequential standup only** — the two pools collide on the shared gateway secret if run in parallel.
-- **`session-affinity`** is omitted (matches the p25 shadow configs). If the IPP log shows blind
-  routing (RecentN=0 / no recorded TTFT), add it back per `static-both-filter-values.yaml`. This
+- **`session-affinity`** is omitted from `-smart-values.yaml` (as the archived runs had it). If the
+  IPP log shows blind routing (RecentN=0 / no recorded TTFT), use `-ttft-aware-fix-values.yaml`. This
   bit on `ttft-aware-fix`: the extractor only fires on the buffered response path, so without a
   ResponseProcessor every request scored (1,1) and routing was uniformly random.
 - Set `LLMDBENCH_WAIT_TIMEOUT=6000`; wait for real vLLM readiness (poll `/v1/completions`, not `/health`).

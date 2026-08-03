@@ -17,14 +17,18 @@ logs, EPP scores, decode KV/queue) — one without the other can't answer it.
   Router/EPP. Default plugins inject `X-Gateway-Model-Name` (from request JSON
   `model`) and `X-Gateway-Base-Model-Name` (from labeled ConfigMaps) before the
   router schedules. With a scorer it also picks the backend model.
-- **Picker = the experiment variable**, and the smart-vs-random difference is
-  **baked into the image build**, not set via helm flags. Build two tagged
-  variants and swap with `helm upgrade --set payloadProcessor.image.tag=...`
-  (no teardown needed between pickers):
-  - **smart** — inflight-requests scorer + max-score picker (load-aware; routes
-    away from a busy backend).
-  - **random** — max-score picker, **no scorer** (load-blind; spreads traffic
-    across all listed pools regardless of load).
+- **The plugin pipeline = the experiment variable**, selected by the values file
+  (`helm upgrade -f <values>`). The scorer must exist in the image; which scorer
+  runs is values-side:
+  - **smart** — a TTFT-predicting scorer (`queue-ttft-scorer` /
+    `ttft-aware-scorer` + `ttft-percentile-extractor`) + max-score picker, routing
+    to the lowest predicted TTFT.
+  - **random** — max-score picker, **no scorer** (`maxscore-baseline-values.yaml`;
+    load-blind, spreads traffic across all listed pools regardless of load).
+  - A TTFT scorer needs a ResponseProcessor (`session-affinity`) to observe TTFT
+    at all; without one every candidate scores equal and routing is random.
+  - A config-only `helm upgrade` does **not** restart the IPP pod (no checksum
+    annotation) — `kubectl rollout restart deploy/payload-processor` between arms.
 - Base-model ConfigMaps consumed by the default plugins **must** carry label
   `inference.llm-d.ai/ipp-managed: "true"`.
 - Supplying **any** `--plugin` (or `listModels`) **replaces the entire default

@@ -23,14 +23,17 @@ from matplotlib.ticker import MultipleLocator
 STAGE_PAD_S = 100.0  # seconds of context shown before/after each stage in zooms
 
 BIN_S = 5.0  # time-window for median aggregation
+UNIT = "C"  # band-label prefix; override with --unit (e.g. RPS for Poisson rate stages)
 # half-concurrency sweep for the static legs (half_8b/half_32b); override with --concurrencies
 CONC_DEFAULT = [25, 75, 125, 175, 225, 275, 225, 175, 125, 75, 25]
 _STAGE_RE = re.compile(r"([0-9-]+ [0-9:,]+).*Stage ([0-9]+) - run (started|completed)")
 
 
-def stage_windows(stdout_path, conc):
+def stage_windows(stdout_path, conc, send_ts=None):
     """Exact stage windows from the inference-perf harness log (UTC epoch, ground
-    truth) mapped to each stage's profile concurrency. Returns [(conc, start, end)]."""
+    truth) mapped to each stage's profile concurrency. Returns [(conc, start, end)].
+    If send_ts (request dispatch epochs) is given, each window ends at the stage's
+    LAST request sent (the TTFT peak) rather than the harness completion (drain)."""
     starts, ends = {}, {}
     for line in open(stdout_path, errors="replace"):
         m = _STAGE_RE.search(line)
@@ -39,24 +42,24 @@ def stage_windows(stdout_path, conc):
         ep = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S,%f").replace(
             tzinfo=datetime.timezone.utc).timestamp()
         (starts if m.group(3) == "started" else ends)[int(m.group(2))] = ep
-    return [(conc[n], starts[n], ends[n]) for n in sorted(starts)
+    wins = [(conc[n], starts[n], ends[n]) for n in sorted(starts)
             if n in ends and n < len(conc)]
+    if send_ts is not None and len(send_ts):
+        st = np.asarray(send_ts)
+        wins = [(c, s, (st[(st >= s) & (st <= e)].max() if ((st >= s) & (st <= e)).any() else e))
+                for c, s, e in wins]
+    return wins
 
 
-def annotate_stages(ax, stdout_path, conc, t0, xmax, xmin=0):
+def annotate_stages(ax, stdout_path, conc, t0, xmax, xmin=0, send_ts=None):
     ytop = ax.get_ylim()[1]
-    prev_end = None
-    for c, s, e in stage_windows(stdout_path, conc):
+    for c, s, e in stage_windows(stdout_path, conc, send_ts):
         s0, e0 = s - t0, e - t0
         if e0 >= xmin and s0 <= xmax:  # stage (partially) visible
             lo, hi = max(s0, xmin), min(e0, xmax)
             ax.axvspan(lo, hi, color="0.90", zorder=0)
-            ax.text((lo + hi) / 2, ytop * 0.97, f"C={c}",
+            ax.text((lo + hi) / 2, ytop * 0.97, f"{UNIT}={c:g}",
                     ha="center", va="top", fontsize=8, color="dimgray")
-            if prev_end is not None and xmin < s0 and s0 - prev_end > 4 and prev_end < xmax:
-                ax.text((max(prev_end, xmin) + s0) / 2, ytop * 0.97, "cooldown",
-                        ha="center", va="top", fontsize=7, color="silver", style="italic")
-        prev_end = e0
 
 
 def plot_series(ax, at, av, pt, pv):
@@ -68,12 +71,12 @@ def plot_series(ax, at, av, pt, pv):
     ax.legend(fontsize=8, loc="center right"); ax.grid(alpha=0.3)
 
 
-def per_stage_zooms(out, label, at, av, pt, pv, stdout_path, conc, t0):
+def per_stage_zooms(out, label, at, av, pt, pv, stdout_path, conc, t0, send_ts=None, tag=""):
     """One zoomed PNG per stage: stage window +/- STAGE_PAD_S, dense time ticks."""
     stem, _ = os.path.splitext(out)
-    d = stem + "_stages"; os.makedirs(d, exist_ok=True)
+    d = stem + (f"_{tag}" if tag else "") + "_stages"; os.makedirs(d, exist_ok=True)
     wrote = 0
-    for n, (c, s, e) in enumerate(stage_windows(stdout_path, conc)):
+    for n, (c, s, e) in enumerate(stage_windows(stdout_path, conc, send_ts)):
         x0, x1 = (s - t0) - STAGE_PAD_S, (e - t0) + STAGE_PAD_S
         win = [v[(t >= x0) & (t <= x1)] for t, v in ((at, av), (pt, pv)) if len(t)]
         if not any(len(w) for w in win):
@@ -82,32 +85,40 @@ def per_stage_zooms(out, label, at, av, pt, pv, stdout_path, conc, t0):
         fig, ax = plt.subplots(figsize=(11, 4.2))
         plot_series(ax, at, av, pt, pv)
         ax.set_xlim(x0, x1); ax.set_ylim(0, ymax * 1.12)
-        annotate_stages(ax, stdout_path, conc, t0, x1, xmin=x0)
+        annotate_stages(ax, stdout_path, conc, t0, x1, xmin=x0, send_ts=send_ts)
         ax.xaxis.set_major_locator(MultipleLocator(20))
         ax.xaxis.set_minor_locator(MultipleLocator(5))
         ax.tick_params(axis="x", labelrotation=45)
-        ax.set_title(f"{label}: stage {n} (C={c}) predicted vs actual TTFT")
-        fig.tight_layout(); fig.savefig(os.path.join(d, f"stage{n:02d}_C{c}.png"), dpi=130)
+        ax.set_title(f"{label}: stage {n} ({UNIT}={c:g}) predicted vs actual TTFT")
+        fig.tight_layout(); fig.savefig(os.path.join(d, f"stage{n:02d}_{UNIT}{c:g}.png"), dpi=130)
         plt.close(fig); wrote += 1
     print(f"{label}: wrote {wrote} stage zooms to {d}/")
 
 
-def parse(path):
-    pred, act = [], []  # (ts, value)
+SHORT = {"Qwen/Qwen3-8B": "8B", "Qwen/Qwen3-32B": "32B"}
+
+
+def parse(path, split_model=False):
+    """{key: (pred, act)} of (ts, value) arrays. key is the model name when
+    split_model, else "" (pooled)."""
+    from collections import defaultdict
+    pred, act = defaultdict(list), defaultdict(list)
     with open(path, errors="replace") as f:
         for line in f:
-            if "queue-ttft score" not in line and "ttft-observation" not in line:
+            if "queue-ttft score" not in line and "ttft-aware score" not in line and "ttft-observation" not in line:
                 continue
             try:
                 r = json.loads(line)
             except ValueError:
                 continue
+            k = r.get("model", "") if split_model else ""
             m = r.get("msg")
-            if m == "queue-ttft score" and "effectiveTTFT" in r:
-                pred.append((r["ts"], r["effectiveTTFT"]))
+            if m in ("queue-ttft score", "ttft-aware score") and "effectiveTTFT" in r:
+                pred[k].append((r["ts"], r["effectiveTTFT"]))
             elif m == "ttft-observation" and "ttft_s" in r:
-                act.append((r["ts"], r["ttft_s"]))
-    return np.array(pred), np.array(act)
+                act[k].append((r["ts"], r["ttft_s"]))
+    return {k: (np.array(pred.get(k, [])), np.array(act.get(k, [])))
+            for k in set(pred) | set(act)}
 
 
 def binned_median(ts, val, t0, bin_s=BIN_S):
@@ -129,20 +140,34 @@ def main():
         i = args.index("-o"); out = args[i + 1]; args = args[:i] + args[i + 2:]
     if "--concurrencies" in args:
         i = args.index("--concurrencies")
-        conc = [int(c) for c in args[i + 1].split(",")]; args = args[:i] + args[i + 2:]
+        conc = [float(c) for c in args[i + 1].split(",")]; args = args[:i] + args[i + 2:]
+    if "--unit" in args:
+        i = args.index("--unit")
+        global UNIT; UNIT = args[i + 1]; args = args[:i] + args[i + 2:]
+    by_model = False
+    if "--by-model" in args:
+        args.remove("--by-model"); by_model = True
     runs = [a.split("=", 1) for a in args]
 
-    n = len(runs)
+    # rows: (label, path, tag, pred, act). --by-model splits one log per model.
+    rows = []
+    for label, path in runs:
+        for key, (pred, act) in sorted(parse(path, split_model=by_model).items()):
+            tag = SHORT.get(key, key)
+            rows.append((f"{label} {tag}" if tag else label, path, tag, pred, act))
+
+    n = len(rows)
     fig, axes = plt.subplots(n, 1, figsize=(11, 4.2 * n), squeeze=False)
-    for row, (label, path) in enumerate(runs):
-        pred, act = parse(path)
+    for row, (label, path, tag, pred, act) in enumerate(rows):
         ax = axes[row][0]
         if len(pred) == 0 and len(act) == 0:
             ax.set_title(f"{label}: no data"); continue
         t0 = min([x[0] for x in (pred, act) if len(x)][0][0],
                  *([act[0][0]] if len(act) else []), *([pred[0][0]] if len(pred) else []))
         pt, pv = binned_median(pred[:, 0], pred[:, 1], t0) if len(pred) else (np.array([]), np.array([]))
-        at, av = binned_median(act[:, 0], act[:, 1], t0) if len(act) else (np.array([]), np.array([]))
+        # bin actual at DISPATCH time (ts - ttft_s), not first-token time, so it shares
+        # the prediction's x-axis -- else actual trails predicted by ~ttft_s.
+        at, av = binned_median(act[:, 0] - act[:, 1], act[:, 1], t0) if len(act) else (np.array([]), np.array([]))
 
         plot_series(ax, at, av, pt, pv)
         ax.set_title(f"{label}: predicted vs actual TTFT over time")
@@ -156,8 +181,13 @@ def main():
                             os.path.join(os.path.dirname(d), "harness_stdout.log"))
                             if os.path.exists(c)), None)
         if stdout_path:
-            annotate_stages(ax, stdout_path, conc, t0, xmax)
-            per_stage_zooms(out, label, at, av, pt, pv, stdout_path, conc, t0)
+            send_ts = pred[:, 0] if len(pred) else None  # request dispatch epochs -> band ends at last-sent
+            stages = stage_windows(stdout_path, conc, send_ts)
+            if stages and not any(s - t0 <= xmax and e - t0 >= 0 for _, s, e in stages):
+                print(f"WARNING: {label}: {stdout_path} stages don't overlap the IPP "
+                      f"log's time span -- mismatched runs? no stage bands/zooms.", file=sys.stderr)
+            annotate_stages(ax, stdout_path, conc, t0, xmax, send_ts=send_ts)
+            per_stage_zooms(out, label, at, av, pt, pv, stdout_path, conc, t0, send_ts=send_ts, tag=tag)
         print(f"{label}: predicted={len(pred)} actual={len(act)} bins={len(pt)}")
 
     fig.tight_layout(); fig.savefig(out, dpi=130)

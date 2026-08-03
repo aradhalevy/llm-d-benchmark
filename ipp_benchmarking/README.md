@@ -8,13 +8,39 @@ findings live there, not here.
 
 Run `llmdbenchmark` **from the repo root** — it auto-discovers this bundle's
 scenarios/specs/profiles (e.g. `--spec cicd/ocp-qwen3-8b-32b`,
-`-w summarization_concurrency_8b32b.yaml`). `example_outputs/` ships sample plots
-+ writeups only; raw run data is too large to commit.
+`-w summarization_concurrency_8b32b.yaml`). Run outputs are **not committed**;
+see [Where to put run data](#where-to-put-run-data).
 
 Two-model **adaptive routing** (Gemma-4-26B-FP8 vs Qwen3.6-35B-FP8, one shared
 `model:"auto"` stream routed by TTFT): see
 [`adaptive-routing-experiment.md`](./adaptive-routing-experiment.md) for the full
 runbook, the per-stage runner, and the per-image filter/plugin differences.
+
+---
+
+## Where to put run data
+
+`example_outputs/` is gitignored — put run data there and nothing is committed.
+One directory per arm; the plotters take arms as positional `label=dir` and always
+write with `-o out.png`. They read some or all of:
+
+| file | produced by | used for |
+|---|---|---|
+| `stage_<N>_lifecycle_metrics.json` | `llmdbenchmark run` | per-stage percentiles / rates |
+| `summary_lifecycle_metrics.json` | `llmdbenchmark run` | whole-run aggregate |
+| `harness_stdout.log` | `llmdbenchmark run` | stage bands (needs the `Stage N - run started/completed` lines) |
+| `per_request_slim.json` | `tools/extract_per_request_slim.py` | latency timeseries; `{"t","lat","fail","ot"}` per request |
+| `ipp-full-live.log` | `tools/ab_routing_run.sh` | routing share, predicted-vs-actual TTFT |
+| `ipp-decisions.log` | `tools/ipp_extract_stage.sh` | per-stage routing slice (adaptive) |
+
+```
+ipp_benchmarking/example_outputs/<experiment>/<arm>/
+```
+
+Copy a `collected-logs-<N>/` bundle in as `<arm>/` for the first three; the last
+three are only produced by the runner scripts. `ab_routing_run.sh` and
+`adaptive_toggle_run.sh` write this layout themselves. Plotters need
+matplotlib/numpy — run them with `.venv/bin/python3`.
 
 ---
 
@@ -27,19 +53,20 @@ fast local smoke test of routing.
 kind create cluster
 docker pull ghcr.io/llm-d/llm-d-benchmark:v0.6.3 && kind load docker-image ghcr.io/llm-d/llm-d-benchmark:v0.6.3
 # build + side-load the IPP image from the IPP repo (tag per scorer-picker):
-make image-build && kind load docker-image ghcr.io/llm-d/llm-d-inference-payload-processor:smartRouting
+export IPP_PATH=/path/to/llm-d-inference-payload-processor
+make -C "$IPP_PATH" image-build REGISTRY=ghcr.io/<you> VERSION=ttft-scorer
+kind load docker-image ghcr.io/<you>/llm-d-inference-payload-processor:ttft-scorer
 
 ./install.sh && source .venv/bin/activate
 llmdbenchmark --spec cicd/kind-sim-multi standup -p llmdbench
 
-export IPP_PATH=/path/to/llm-d-inference-payload-processor
+# The values file carries the plugin pipeline, listModels and image wiring; set
+# payloadProcessor.image.registry in it to your own. If a previous release was
+# hand-patched, `helm upgrade` fails on SSA field-manager conflicts --
+# `helm uninstall payload-processor -n llmdbench` and install fresh.
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
-  -n llmdbench --set provider.name=istio \
-  --set payloadProcessor.image.tag=smartRouting --set payloadProcessor.image.pullPolicy=Never \
-  --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
-  --set provider.supportedEvents.responseBody=true --set provider.messageTimeout=1200s \
-  --set inferenceGateway.name=infra-llmdbench-inference-gateway \
-  --set 'payloadProcessor.listModels[0]=facebook/opt-125m' --set 'payloadProcessor.listModels[1]=facebook/opt-350m'
+  -n llmdbench -f ipp_benchmarking/ipp_configs/kind-sim-smart-values.yaml
+kubectl rollout restart deploy/payload-processor -n llmdbench
 # listModels needs a chart that renders models.json -- see the note in the OCP section below
 kubectl apply -n llmdbench -f ipp_benchmarking/ipp_configs/opt-125m-base-model.yaml \
                            -f ipp_benchmarking/ipp_configs/opt-350m-base-model.yaml
@@ -56,6 +83,21 @@ llmdbenchmark --spec cicd/kind-sim-multi run -l inference-perf -w sanity_random.
 NAMESPACE=llmdbench ./ipp_benchmarking/collect_logs.sh        # -> ./collected-logs-<N>/
 llmdbenchmark --spec cicd/kind-sim-multi teardown -p llmdbench
 helm uninstall payload-processor -n llmdbench                 # IPP isn't torn down automatically
+```
+
+**A/B the scorer.** Re-run the block above with
+`maxscore-baseline-values.yaml` (no scorer -> random ~50/50) as the second arm; a
+config-only `helm upgrade` does **not** restart the IPP, so `kubectl rollout
+restart deploy/payload-processor` between arms. Both plotters accept either an arm
+dir or a whole `collected-logs-<N>/` bundle:
+
+```bash
+C=30,50,70,90,110,130,150,170,190,210,230
+A="random"=collected-logs-random "smart"=collected-logs-smart
+.venv/bin/python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_kind.py $A \
+  --concurrencies $C --bars split -o latency_vs_concurrency_kind.png
+.venv/bin/python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_kind.py $A \
+  --concurrencies $C -o routing_vs_concurrency_kind.png
 ```
 
 ---
@@ -111,12 +153,12 @@ llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p "$NAMESPACE"
 #      oc patch cm payload-processor -n "$NAMESPACE" --type=merge \
 #        -p '{"data":{"models.json":"{\"models\":[{\"name\":\"Qwen/Qwen3-8B\"},{\"name\":\"Qwen/Qwen3-32B\"}]}"}}'
 #      oc rollout restart deploy/payload-processor -n "$NAMESPACE"
-export VALUES=$IPP_PATH/ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values; static-both-filter for concurrent 8B+32B
+export VALUES=ipp_benchmarking/ipp_configs/static-8b-only-values.yaml   # then -32b-only, then median-ttft-ocp-values
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" --set provider.name=istio -f "$VALUES" \
-   --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
-  --set provider.supportedEvents.responseBody=true
-    --set 'payloadProcessor.flags.v=4' \
+  --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
+  --set provider.supportedEvents.responseBody=true \
+  --set 'payloadProcessor.flags.v=4' \
   --set payloadProcessor.image.registry=ghcr.io/aradhalevy --set payloadProcessor.image.tag=ttft-scorer \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=1200s
 kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yaml \
@@ -126,8 +168,8 @@ kubectl apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-mode
 # Pool names are derived from $NAMESPACE -- no hand-editing.
 ipp_benchmarking/tools/gen_httproutes.sh "$NAMESPACE" | kubectl apply -f -
 
-# 3. Edit the vars at the top of tools/ab_routing_run.sh: REPO (repo path), NS
-#    (namespace), GW (in-cluster gateway URL — embeds the namespace).
+# 3. Edit the vars at the top of tools/ab_routing_run.sh: NS (namespace) and GW
+#    (in-cluster gateway URL — embeds the namespace).
 
 # 4. Run ONE arm at a time. Each block below is a SINGLE command (note the trailing
 #    backslashes) with three positional args:
@@ -173,8 +215,8 @@ override for the smart full sweep.
   "8b"=$D/static_8b/ipp-full-live.log -o $D/ttft_8b_fullrun.png
 ```
 
-`ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`
-(a re-run overwrites the committed sample). The smart run drives `sweep_8stage.yaml`;
+`ab_routing_run.sh` writes into `example_outputs/ocp-research-agent-routing/<arm>/`.
+The smart run drives `sweep_8stage.yaml`;
 the static baselines drive `half_8b.yaml` / `half_32b.yaml` — the IPP config + the
 registered model(s) are what change between runs.
 

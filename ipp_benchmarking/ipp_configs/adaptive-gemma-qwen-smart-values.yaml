@@ -4,11 +4,10 @@
 #                        TTFT (the SHARED adaptive probe)
 #   exact "<gemma>" / "<qwen>" -> PINNED to that one pool (direct-to-pool / toggled load)
 # (model-name-filter is exact-match only and 429s "auto"; model-group-name-filter does both.)
-# ttft-aware-scorer + ttft-percentile-extractor params match shadow-ttft-p25-*-values.yaml.
 #
 # If routing is blind (IPP log shows RecentN=0 / no recorded TTFT on this image's streaming
-# path), add a ResponseProcessor to record TTFT: append `- pluginRef: session-affinity` under
-# profiles.default.response and `- type: session-affinity` to plugins (see static-both-filter).
+# path), a ResponseProcessor is needed to record TTFT -- use
+# adaptive-gemma-qwen-ttft-aware-fix-values.yaml, which adds session-affinity.
 provider:
   supportedEvents:
     requestTrailers: true

@@ -1,0 +1,30 @@
+# Qwen saturation sweep (20/25/30/35/40 rps, 30s each) for the adaptive experiment. Exact
+# model_name pins to the pool via the IPP model-group-name-filter. Real pinned shape (2048 in).
+load:
+  type: poisson
+  interval: 0
+  request_timeout: 1200
+  stages:
+  - {rate: 20.0, duration: 30}
+  - {rate: 25.0, duration: 30}
+  - {rate: 30.0, duration: 30}
+  - {rate: 35.0, duration: 30}
+  - {rate: 40.0, duration: 30}
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: "Qwen/Qwen3.6-35B-A3B-FP8"
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: Qwen/Qwen3.6-35B-A3B-FP8
+data:
+  type: random
+  input_distribution:  {min: 1024, max: 4096, mean: 2048, std_dev: 512, total_count: 200}
+  output_distribution: {min: 16,   max: 128,  mean: 64,   std_dev: 32,  total_count: 200}
+report:
+  request_lifecycle: {summary: true, per_stage: true, per_request: true}
+storage:
+  local_storage: {path: /workspace}

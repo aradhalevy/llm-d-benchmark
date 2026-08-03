@@ -1,0 +1,30 @@
+# Gemma saturation sweep with the SHARED load shape (shareGPT ~135/126 tok, ignore_eos).
+# Exact model_name pins to the pool via the IPP model-group-name-filter. Rates 20/40/60/80/100.
+load:
+  type: poisson
+  interval: 0
+  request_timeout: 1200
+  stages:
+  - {rate: 20.0,  duration: 30}
+  - {rate: 40.0,  duration: 30}
+  - {rate: 60.0,  duration: 30}
+  - {rate: 80.0,  duration: 30}
+  - {rate: 100.0, duration: 30}
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic"
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
+data:
+  type: shareGPT
+  input_distribution:  {min: 10, max: 1024}
+  output_distribution: {min: 10, max: 1024}
+report:
+  request_lifecycle: {summary: true, per_stage: true, per_request: true}
+storage:
+  local_storage: {path: /workspace}

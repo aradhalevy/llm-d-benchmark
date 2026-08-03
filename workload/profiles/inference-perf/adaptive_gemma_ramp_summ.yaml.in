@@ -1,0 +1,34 @@
+# Gemma-PINNED saturation ramp for the adaptive experiment, on the FINAL summarization shape
+# (~2048 in / ~256 out) and the model's OWN tokenizer -- the pair that the real stages will use.
+# Stage -1 at 10 rps saturated both pools (achieved 8.6-9.0 rps, e2e p50 ~32 s), so the pinned rate
+# has to be re-measured for this exact shape rather than reused from the earlier ramps (Gemma 11.1
+# rps was measured at ~2048 real input; Qwen 18.9 rps was at 65-token outputs, where the
+# --max-num-seqs 64 cap does not bind).
+# per_request off: ramps only need the per-stage percentiles, and it keeps collection quick.
+load:
+  type: poisson
+  interval: 30          # cooldown so each rate starts from a drained queue
+  request_timeout: 120
+  stages:
+  - {rate: 12.0, duration: 120}
+  - {rate: 14.0, duration: 120}
+  - {rate: 16.0, duration: 120}
+  - {rate: 18.0, duration: 120}
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic"
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
+data:
+  type: random
+  input_distribution:  {min: 1024, max: 4096, mean: 2048, std_dev: 512, total_count: 200}
+  output_distribution: {min: 128,  max: 512,  mean: 256,  std_dev: 64,  total_count: 200}
+report:
+  request_lifecycle: {summary: true, per_stage: true, per_request: false}
+storage:
+  local_storage: {path: /workspace}

@@ -44,7 +44,8 @@ COLOR = {SMALL: "#2ca02c", BIG: "#9467bd"}
 
 def load_decisions(run: Path):
     """(ts, model) per pick, deduped by x-request-id, sorted by ts."""
-    logs = glob.glob(str(run / "ipp-decisions.log")) + glob.glob(str(run / "ipp-model-selected.log"))
+    logs = (glob.glob(str(run / "ipp-full-live.log")) + glob.glob(str(run / "ipp-decisions.log"))
+            + glob.glob(str(run / "ipp-model-selected.log")))
     sel, ts = {}, {}
     for lg in logs[:1]:
         for line in open(lg, errors="ignore"):

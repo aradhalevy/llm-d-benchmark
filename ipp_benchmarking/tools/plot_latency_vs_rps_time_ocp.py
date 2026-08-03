@@ -45,11 +45,15 @@ def load_routed_models(run: Path):
     """Ordered routed-model decisions from the IPP log (deduped by x-request-id,
     earliest ts). Each summarizer request's *routed* model — known even for the ones
     that later time out, unlike the served model which is empty on a 504."""
-    log = run / "ipp-decisions.log"
+    log = run / "ipp-full-live.log"
+    if not log.exists():
+        log = run / "ipp-decisions.log"
     if not log.exists():
         return []
     seen = {}
-    for line in open(log):
+    for line in open(log, errors="ignore"):
+        if '"msg":"Model selected"' not in line:
+            continue
         try:
             d = json.loads(line)
         except json.JSONDecodeError:
