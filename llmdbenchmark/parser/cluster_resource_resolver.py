@@ -88,6 +88,32 @@ class ClusterResourceResolver:
         "gpu.intel.com/xe",
     ]
 
+    # Runtime/profile identity derived from the device-plugin resource.  The
+    # resource name is what Kubernetes exposes; the profile is what the plan
+    # renderer uses to select image, security-context and command overrides.
+    ACCELERATOR_PROFILES = {
+        "nvidia.com/gpu": "nvidia",
+        "amd.com/gpu": "amd",
+        "habana.ai/gaudi": "intel-gaudi",
+        "google.com/tpu": "google",
+        "intel.com/gpu": "intel-i915",
+        "gpu.intel.com/i915": "intel-i915",
+        "gpu.intel.com/xe": "intel-xe",
+    }
+    PROFILE_RESOURCES = {
+        "nvidia": "nvidia.com/gpu",
+        "amd": "amd.com/gpu",
+        "intel-gaudi": "habana.ai/gaudi",
+        "google": "google.com/tpu",
+        "intel-i915": "gpu.intel.com/i915",
+        "intel-xe": "gpu.intel.com/xe",
+    }
+    INTEL_XPU_RESOURCE_PRIORITY = (
+        "gpu.intel.com/xe",
+        "gpu.intel.com/i915",
+        "intel.com/gpu",
+    )
+
     # Attribute names that mark a node label as a GPU SKU identifier (as
     # opposed to a count, memory size, or feature flag). The matcher pulls
     # the part after the LAST ``/`` or ``.``, so both naming conventions
@@ -101,6 +127,18 @@ class ClusterResourceResolver:
             "class",  # gpu.nvidia.com/class
         }
     )
+
+    # Priority order for GPU label attribute selection when multiple labels
+    # are available. Labels are matched by their final attribute name (after
+    # the last `/` or `.`). Cloud provider labels (no attribute suffix) are
+    # treated as highest priority. Earlier items are preferred.
+    GPU_LABEL_PRIORITY = [
+        None,  # Cloud provider labels (cloud.google.com/gke-accelerator)
+        "product",  # Most specific SKU identifier
+        "product-name",  # AMD's variant of product
+        "family",  # GPU family (less specific than product)
+        "class",  # GPU class (least specific)
+    ]
 
     # Cloud-managed accelerator labels that don't follow the vendor-prefix
     # convention (the node operator sets them on accelerator-enabled nodes).
@@ -130,9 +168,15 @@ class ClusterResourceResolver:
         "rdma/ib",
     ]
 
-    def __init__(self, logger: Any, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        logger: Any,
+        dry_run: bool = False,
+        kubeconfig: str | None = None,
+    ) -> None:
         self.logger = logger
         self.dry_run = dry_run
+        self.kubeconfig = kubeconfig
         self._node_resources: NodeResources | None = None
         self._api_client: Any = None
         self._connected = False
@@ -140,6 +184,18 @@ class ClusterResourceResolver:
     def resolve_all(self, values: dict) -> dict:
         """Resolve all ``"auto"`` cluster resource values. Returns a new dict."""
         result = deepcopy(values)
+
+        # An explicitly selected profile is also the chart accelerator type.
+        # Do this before the no-auto fast path so manual/offline selection has
+        # the same result as cluster detection.
+        accelerator = result.get("accelerator") or {}
+        explicit_profile = accelerator.get("profile")
+        if explicit_profile and explicit_profile != "auto":
+            accelerator["type"] = explicit_profile
+            if accelerator.get("resource") == "auto":
+                explicit_resource = self.PROFILE_RESOURCES.get(explicit_profile)
+                if explicit_resource:
+                    accelerator["resource"] = explicit_resource
 
         auto_fields = self.has_unresolved(result)
         if not auto_fields:
@@ -153,6 +209,7 @@ class ClusterResourceResolver:
 
         unresolved: list[str] = []
         self._resolve_accelerator_resource(result, unresolved)
+        self._resolve_accelerator_profile(result, unresolved)
         self._resolve_network_resource(result, unresolved)
         self._resolve_affinity_node_selector(result, unresolved)
         self._resolve_accelerator_type_labels(result, unresolved)
@@ -179,6 +236,8 @@ class ClusterResourceResolver:
 
         if values.get("accelerator", {}).get("resource") == "auto":
             unresolved.append("accelerator.resource")
+        if values.get("accelerator", {}).get("profile") == "auto":
+            unresolved.append("accelerator.profile")
 
         vllm = values.get("vllmCommon", {})
         if vllm.get("networkResource") == "auto":
@@ -222,7 +281,7 @@ class ClusterResourceResolver:
                     "Install with: pip install kubernetes"
                 )
 
-            self._api_client = kube_connect()
+            self._api_client = kube_connect(kubeconfig=self.kubeconfig)
             self._connected = True
             self.logger.log_info("Connected to cluster for resource auto-detection")
             return True
@@ -385,6 +444,36 @@ class ClusterResourceResolver:
         attribute = label_key.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
         return attribute in cls.GPU_SKU_LABEL_ATTRIBUTES
 
+    @classmethod
+    def _select_best_gpu_label_key(cls, gpu_labels: dict[str, list[str]]) -> str:
+        """Select the most appropriate GPU label key from available options.
+
+        Uses GPU_LABEL_PRIORITY to prefer more specific labels (e.g., product)
+        over less specific ones (e.g., family, class). Cloud provider labels
+        (no attribute suffix) are highest priority.
+
+        Returns the first key in priority order, or the first key in sorted
+        order if none match the priority list (should not happen in practice).
+        """
+        if not gpu_labels:
+            raise ValueError("gpu_labels is empty")
+
+        # Try each priority level in order
+        for priority_attr in cls.GPU_LABEL_PRIORITY:
+            for label_key in gpu_labels:
+                if priority_attr is None:
+                    # Cloud provider labels have no attribute suffix
+                    if label_key in cls.CLOUD_PROVIDER_GPU_LABEL_KEYS:
+                        return label_key
+                else:
+                    # Extract attribute from label key
+                    attr = label_key.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+                    if attr == priority_attr:
+                        return label_key
+
+        # Fallback: return first key in sorted order (for determinism)
+        return sorted(gpu_labels.keys())[0]
+
     def _resolve_accelerator_resource(
         self,
         values: dict,
@@ -397,12 +486,71 @@ class ClusterResourceResolver:
 
         resources = self._node_resources or NodeResources()
 
-        if resources.accelerator_resources:
+        if len(resources.accelerator_resources) == 1:
             resolved = resources.accelerator_resources[0]
             accel["resource"] = resolved
             self.logger.log_info(f"Resolved accelerator.resource: {resolved}")
+        elif len(resources.accelerator_resources) > 1:
+            discovered_resources = set(resources.accelerator_resources)
+            intel_xpu_resources = set(self.INTEL_XPU_RESOURCE_PRIORITY)
+            if discovered_resources.issubset(intel_xpu_resources):
+                # Intel's device plugin may advertise both the legacy i915
+                # name and the Xe name for the same physical devices. Treat
+                # those as compatible aliases, preferring the modern Xe key.
+                resolved = next(
+                    resource
+                    for resource in self.INTEL_XPU_RESOURCE_PRIORITY
+                    if resource in discovered_resources
+                )
+                accel["resource"] = resolved
+                self.logger.log_info(
+                    "Discovered compatible Intel XPU resource aliases "
+                    f"({', '.join(resources.accelerator_resources)}); "
+                    f"selected {resolved}"
+                )
+                return
+            discovered = ", ".join(resources.accelerator_resources)
+            raise RuntimeError(
+                "Multiple accelerator resources were discovered "
+                f"({discovered}); set accelerator.resource or "
+                "accelerator.profile explicitly."
+            )
+        elif self.dry_run:
+            # A dry-run deliberately does not connect to the cluster. Keep its
+            # historical NVIDIA rendering behaviour while allowing real runs
+            # to auto-detect the accelerator.
+            accel["resource"] = "nvidia.com/gpu"
+            self.logger.log_info(
+                "[DRY RUN] Defaulting accelerator.resource to nvidia.com/gpu"
+            )
         else:
             unresolved.append("accelerator.resource")
+
+    def _resolve_accelerator_profile(
+        self,
+        values: dict,
+        unresolved: list[str],
+    ) -> None:
+        """Resolve ``accelerator.profile/type`` from the resource key.
+
+        ``profile`` is intentionally distinct from the Kubernetes resource:
+        it selects reusable runtime configuration and per-guide variants.
+        Explicit profiles are never overwritten.
+        """
+        accel = values.get("accelerator", {})
+        if accel.get("profile") != "auto":
+            return
+
+        resource = accel.get("resource")
+        profile = self.ACCELERATOR_PROFILES.get(resource)
+        if profile:
+            accel["profile"] = profile
+            accel["type"] = profile
+            self.logger.log_info(
+                f"Resolved accelerator.profile: {profile} (resource={resource})"
+            )
+        else:
+            unresolved.append("accelerator.profile")
 
     def _resolve_network_resource(
         self,
@@ -474,7 +622,7 @@ class ClusterResourceResolver:
         resources = self._node_resources or NodeResources()
 
         if resources.gpu_labels:
-            label_key = next(iter(resources.gpu_labels))
+            label_key = self._select_best_gpu_label_key(resources.gpu_labels)
             label_value = resources.gpu_labels[label_key][0]
 
             affinity["nodeSelector"] = {label_key: label_value}
@@ -536,7 +684,7 @@ class ClusterResourceResolver:
                 continue
 
             if resources.gpu_labels:
-                label_key = next(iter(resources.gpu_labels))
+                label_key = self._select_best_gpu_label_key(resources.gpu_labels)
                 label_value = resources.gpu_labels[label_key][0]
 
                 accel_type["labelKey"] = label_key

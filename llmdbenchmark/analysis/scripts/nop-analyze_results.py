@@ -307,7 +307,10 @@ def write_fma_metrics(  # pylint: disable=too-many-locals,too-many-statements
         "Source: DPC = tighter timing from DPC logs, Kube = upper bound from Kube timestamps\n"
     )
     file.write("T_first_token: Time for vLLM server to return first token\n")
-    file.write("Each iteration scales ReplicaSet from 0 to 1 and then from 1 to 0\n")
+    file.write(
+        "Each iteration scales the requester Deployment from 0 to 1 "
+        "and then from 1 to 0\n"
+    )
 
     hot_starts = 0
     warm_starts = 0
@@ -347,15 +350,31 @@ def write_fma_metrics(  # pylint: disable=too-many-locals,too-many-statements
                 else None
             )
             node = launcher_info.get("launcher_node", "")
-            source = (
-                "DPC" if launcher_info.get("dpc_timing_available", False) else "Kube"
-            )
+            # Three-way timing source so a degraded pod-create baseline is
+            # distinguishable from a container-start Kube fallback at a glance.
+            # Fall back to the legacy dpc_timing_available flag for older reports
+            # that predate the timing_source field.
+            source_map = {
+                "dpc": "DPC",
+                "kube_container_start": "Kube (container-start)",
+                "kube_pod_create": "Kube (pod-create)",
+            }
+            timing_source = launcher_info.get("timing_source")
+            if timing_source in source_map:
+                source = source_map[timing_source]
+            else:
+                source = (
+                    "DPC"
+                    if launcher_info.get("dpc_timing_available", False)
+                    else "Kube"
+                )
 
             pandas_datas.append(
                 {
                     "Iteration": iteration["iteration"]["value"],
                     "vLLM Name": launcher_info["name"],
                     "Node": node,
+                    "GPU UUID": launcher_info["requester_info"].get("gpu_uuids", ""),
                     "Actuation Condition": actuation_condition,
                     "T_actuation(s)": ttrr,
                     "T_hot(s)": t_hot_val,

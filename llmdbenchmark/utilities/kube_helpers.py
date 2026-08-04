@@ -7,6 +7,7 @@ step_08, and step_10.
 
 from __future__ import annotations
 
+import json
 import shutil
 import time
 from pathlib import Path
@@ -27,6 +28,66 @@ CRASH_STATES = {
 }
 
 DATA_ACCESS_LABEL = "role=llm-d-benchmark-data-access"
+
+
+def _terminated_state_detail(prefix: str, state: dict) -> str:
+    """Format a terminated container state for a user-facing error."""
+    reason = state.get("reason") or "unknown reason"
+    detail = f"{prefix}{reason}"
+    if state.get("exitCode") is not None:
+        detail += f", exit_code={state['exitCode']}"
+    return detail
+
+
+def _pod_crash_details(pod: dict) -> list[str]:
+    """Return concrete crash details for containers in a pod."""
+    metadata = pod.get("metadata", {})
+    status = pod.get("status", {})
+    pod_name = metadata.get("name", "unknown-pod")
+    failures: list[str] = []
+
+    status_groups = (
+        status.get("initContainerStatuses", []),
+        status.get("containerStatuses", []),
+        status.get("ephemeralContainerStatuses", []),
+    )
+    for container_statuses in status_groups:
+        for container_status in container_statuses or []:
+            state = container_status.get("state", {})
+            details: list[str] = []
+
+            waiting = state.get("waiting") or {}
+            waiting_reason = waiting.get("reason")
+            if waiting_reason in CRASH_STATES:
+                details.append(waiting_reason)
+
+            terminated = state.get("terminated") or {}
+            terminated_reason = terminated.get("reason")
+            terminated_exit_code = terminated.get("exitCode")
+            if terminated and (
+                terminated_reason in CRASH_STATES
+                or (terminated_exit_code is not None and terminated_exit_code != 0)
+            ):
+                details.append(_terminated_state_detail("terminated: ", terminated))
+
+            if not details:
+                continue
+
+            last_terminated = (container_status.get("lastState") or {}).get(
+                "terminated"
+            )
+            if last_terminated:
+                details.append(
+                    _terminated_state_detail("last terminated: ", last_terminated)
+                )
+
+            container_name = container_status.get("name", "unknown-container")
+            failures.append(f"{pod_name}/{container_name} ({', '.join(details)})")
+
+    if not failures and status.get("reason") in CRASH_STATES:
+        failures.append(f"{pod_name} ({status['reason']})")
+
+    return failures
 
 
 # ---------------------------------------------------------------------------
@@ -163,44 +224,62 @@ def wait_for_pods_by_label(
     """
     errors: list[str] = []
 
-    # Phase A: Wait for pods to become Ready (running)
+    # POLL-based wait (replaces two-phase `kubectl wait`). A short-lived agentic
+    # pod can reach Succeeded/Failed before/at `kubectl wait --for=Ready=True`
+    # (which then hangs the full timeout: a terminal pod never becomes Ready nor
+    # is deleted), and phase B errors NotFound when a finished pod is GC'd
+    # between polls. Polling phases is immune: "arrived" = Running or terminal;
+    # "done" = all terminal OR gone. --natan (via claude)
+    import time as _time
+
+    def _phases():
+        r = cmd.kube(
+            "get",
+            "pods",
+            "-l",
+            f"app={label}",
+            "--namespace",
+            namespace,
+            "-o",
+            "jsonpath={.items[*].status.phase}",
+            check=False,
+        )
+        return r.stdout.split() if r.success else []
+
     context.logger.log_info(
         f"Waiting for pods (label=app={label}) to start (timeout={timeout}s)..."
     )
-    result = cmd.kube(
-        "wait",
-        "--for=condition=Ready=True",
-        "pod",
-        "-l",
-        f"app={label}",
-        "--namespace",
-        namespace,
-        f"--timeout={timeout}s",
-        check=False,
-    )
-    if not result.success:
-        errors.append(f"Pods failed to become Ready: {result.stderr.strip()}")
+    ARRIVED = ("Running", "Succeeded", "Failed")
+    TERMINAL = ("Succeeded", "Failed")
+    waited = 0
+    poll = 5
+    arrived = False
+    while waited < timeout:
+        ph = _phases()
+        if ph and all(p in ARRIVED for p in ph):
+            arrived = True
+            break
+        _time.sleep(poll)
+        waited += poll
+    if not arrived:
+        errors.append(
+            f"Pods failed to reach Running/terminal within {timeout}s (phases={_phases()})"
+        )
         return errors
-
     context.logger.log_info("All pods are running")
-
-    # Phase B: Wait for pods to complete (Ready=False after finish)
     context.logger.log_info(
         f"Waiting for pods (label=app={label}) to complete (timeout={timeout}s)..."
     )
-    result = cmd.kube(
-        "wait",
-        f"--timeout={timeout}s",
-        "--for=condition=ready=False",
-        "pod",
-        "-l",
-        f"app={label}",
-        "--namespace",
-        namespace,
-        check=False,
-    )
-    if not result.success:
-        errors.append(f"Pods did not complete within timeout: {result.stderr.strip()}")
+    done = False
+    while waited < timeout:
+        ph = _phases()
+        if not ph or all(p in TERMINAL for p in ph):
+            done = True
+            break
+        _time.sleep(poll)
+        waited += poll
+    if not done:
+        errors.append(f"Pods did not complete within {timeout}s (phases={_phases()})")
         return errors
 
     # Check for crash states
@@ -211,18 +290,18 @@ def wait_for_pods_by_label(
         f"app={label}",
         "--namespace",
         namespace,
-        "--no-headers",
+        "-o",
+        "json",
         check=False,
     )
     if check_result.success and check_result.stdout:
-        for state in CRASH_STATES:
-            if state in check_result.stdout:
-                errors.append(
-                    f"Found pods in error state. Run: "
-                    f"kubectl --namespace {namespace} get pods "
-                    f"-l app={label}"
-                )
-                break
+        try:
+            pods = json.loads(check_result.stdout).get("items", [])
+        except (json.JSONDecodeError, AttributeError):
+            pods = []
+        crash_details = [detail for pod in pods for detail in _pod_crash_details(pod)]
+        if crash_details:
+            errors.append("Found pods in error state: " + "; ".join(crash_details))
 
     if not errors:
         context.logger.log_info("All pods completed successfully")
@@ -355,11 +434,14 @@ def collect_pod_results(
     local_path = local_results_dir / pod_suffix
     local_path.mkdir(parents=True, exist_ok=True)
 
+    # oc cp does not support --retries; kubectl cp does (v1.23+). Skip flag for oc.
+    cp_args = ["cp"]
+    if not cmd.openshift:
+        cp_args.append("--retries=5")
+    cp_args.extend([remote_path, str(local_path)])
+
     cp_result = cmd.kube(
-        "cp",
-        "--retries=5",
-        remote_path,
-        str(local_path),
+        *cp_args,
         namespace=namespace,
         check=False,
     )

@@ -7,6 +7,7 @@ from pathlib import Path
 from llmdbenchmark.executor.step import Step, StepResult, Phase
 from llmdbenchmark.executor.context import ExecutionContext
 from llmdbenchmark.executor.command import CommandExecutor
+from llmdbenchmark.utilities.endpoint import resolve_direct_service_namespace
 
 
 class DeployModelserviceStep(Step):
@@ -51,6 +52,10 @@ class DeployModelserviceStep(Step):
         timeout = (
             context.modelservice_deploy_timeout
         )  # Generic timeout for all pods in step 9
+        gateway_class = self._require_config(plan_config, "gateway", "className")
+        direct_service_mode = gateway_class == "none"
+        if direct_service_mode:
+            namespace = resolve_direct_service_namespace(plan_config, namespace)
 
         if not context.dry_run:
             pc_error = self._check_priority_class(cmd, plan_config, context)
@@ -111,6 +116,19 @@ class DeployModelserviceStep(Step):
                 )
                 if not result.success:
                     errors.append(f"Failed to deploy modelservice: {result.stderr}")
+
+        if direct_service_mode:
+            direct_service_yaml = self._find_yaml(
+                stack_path, "13a_modelservice-direct-service"
+            )
+            if not direct_service_yaml or not self._has_yaml_content(
+                direct_service_yaml
+            ):
+                errors.append("Direct modelservice Service manifest was not rendered")
+            else:
+                result = cmd.kube("apply", "-f", str(direct_service_yaml))
+                if not result.success:
+                    errors.append(f"Failed to apply direct Service: {result.stderr}")
 
         httproute_yaml = self._find_yaml(stack_path, "08_httproute")
         if httproute_yaml and self._has_yaml_content(httproute_yaml):
@@ -225,39 +243,43 @@ class DeployModelserviceStep(Step):
             #
             # Probe both candidate labels once each so we discover which
             # the chart actually applied, then wait on that one.
-            release_epp = f"{model_id_label}-router-epp"
-            chosen_label = f"llm-d-router-gateway={release_epp}"  # default
-            for candidate_key in ("llm-d-router-gateway", "llm-d-router-standalone"):
-                probe_label = f"{candidate_key}={release_epp}"
-                probe = cmd.kube(
-                    "get",
-                    "pods",
-                    "-l",
-                    probe_label,
-                    "--namespace",
-                    namespace,
-                    "-o",
-                    "jsonpath={.items[*].metadata.name}",
-                    check=False,
-                )
-                if probe.success and probe.stdout.strip():
-                    chosen_label = probe_label
-                    break
-
-            pool_wait = cmd.wait_for_pods(
-                label=chosen_label,
-                namespace=namespace,
-                timeout=timeout,
-                poll_interval=10,
-                description="inference pool",
-            )
-            if not pool_wait.success:
-                stderr_lower = pool_wait.stderr.lower()
-                if (
-                    "no matching resources found" not in stderr_lower
-                    and "no pods found" not in stderr_lower
+            if not direct_service_mode:
+                release_epp = f"{model_id_label}-router-epp"
+                chosen_label = f"llm-d-router-gateway={release_epp}"  # default
+                for candidate_key in (
+                    "llm-d-router-gateway",
+                    "llm-d-router-standalone",
                 ):
-                    errors.append(f"Inference pool not ready: {pool_wait.stderr}")
+                    probe_label = f"{candidate_key}={release_epp}"
+                    probe = cmd.kube(
+                        "get",
+                        "pods",
+                        "-l",
+                        probe_label,
+                        "--namespace",
+                        namespace,
+                        "-o",
+                        "jsonpath={.items[*].metadata.name}",
+                        check=False,
+                    )
+                    if probe.success and probe.stdout.strip():
+                        chosen_label = probe_label
+                        break
+
+                pool_wait = cmd.wait_for_pods(
+                    label=chosen_label,
+                    namespace=namespace,
+                    timeout=timeout,
+                    poll_interval=10,
+                    description="inference pool",
+                )
+                if not pool_wait.success:
+                    stderr_lower = pool_wait.stderr.lower()
+                    if (
+                        "no matching resources found" not in stderr_lower
+                        and "no pods found" not in stderr_lower
+                    ):
+                        errors.append(f"Inference pool not ready: {pool_wait.stderr}")
 
         if not errors and not context.dry_run:
             self._collect_logs(cmd, context, namespace)
@@ -297,9 +319,9 @@ class DeployModelserviceStep(Step):
                     "PodMonitor skipped (template not rendered for this configuration)"
                 )
 
-        gateway_class = self._require_config(plan_config, "gateway", "className")
-
-        if gateway_class in ("kgateway", "agentgateway"):
+        if direct_service_mode:
+            service_name = f"{model_id_label}-direct"
+        elif gateway_class in ("kgateway", "agentgateway"):
             service_name = f"infra-{release}-inference-gateway"
         else:
             # Covers istio / gke / data-science-gateway-class / epponly.
@@ -312,7 +334,7 @@ class DeployModelserviceStep(Step):
         # In epponly mode there is no Gateway resource to label, and the
         # router chart's auto-generated route is to the EPP gRPC port which
         # we'd otherwise rewrite to point at the Gateway. Skip both.
-        if gateway_class != "epponly":
+        if gateway_class not in ("epponly", "none"):
             username = context.username or "unknown"
             cmd.kube(
                 "label",
@@ -359,21 +381,30 @@ class DeployModelserviceStep(Step):
                     f"service/{route_service}:80"
                 )
 
-        # WVA controller + prometheus-adapter are installed up-front by
-        # step_02 (admin prerequisites). Here we only apply this stack's
-        # VariantAutoscaling + HPA resources so the (already-running)
-        # controller can manage THIS model's decode deployment.
+        # WVA controller is installed up-front by step_03 (admin prerequisites).
+        # Here we only apply this stack's KEDA ScaledObject so the (already-running)
+        # controller can manage THIS model's decode deployment via KEDA autoscaling.
         wva_config = plan_config.get("wva", {})
         if wva_config.get("enabled", False) and context.is_openshift:
             self._apply_wva_stack_resources(cmd, stack_path, errors)
             self._log_wva_stack_state(cmd, context, plan_config)
 
+        # EPP+KEDA saturation autoscaling (controller-free alternative to WVA).
+        # Per-stack: ServiceMonitor, EPP metrics RBAC, TriggerAuthentication,
+        # ScaledObject.
+        epp_keda_config = plan_config.get("eppKedaSaturation", {})
+        if epp_keda_config.get("enabled", False) and context.is_openshift:
+            self._apply_epp_keda_stack_resources(cmd, stack_path, errors)
+            self._log_epp_keda_stack_state(cmd, context, plan_config)
+
         self._propagate_standup_parameters(cmd, context, plan_config)
 
         if not errors:
-            resource_types = "deployment,service,pods,gateway,httproute"
-            if context.is_openshift:
-                resource_types += ",route"
+            resource_types = "deployment,service,pods"
+            if not direct_service_mode:
+                resource_types += ",gateway,httproute"
+                if context.is_openshift:
+                    resource_types += ",route"
             cmd.kube(
                 "get",
                 resource_types,
@@ -644,14 +675,14 @@ class DeployModelserviceStep(Step):
         stack_path: Path,
         errors: list,
     ) -> None:
-        """Apply this stack's VariantAutoscaling + HPA to the WVA namespace.
+        """Apply this stack's KEDA ScaledObject to the WVA namespace.
 
-        The WVA controller + prometheus-adapter were already installed by
-        step_02 once per unique wva.namespace. Here we only kubectl apply
-        the per-stack resources so a single controller can manage multiple
-        models.
+        The WVA controller was already installed by step_03 once per unique
+        wva.namespace. Here we only kubectl apply the per-stack ScaledObject so
+        a single controller can manage multiple models. KEDA generates and
+        manages the HPA automatically when the ScaledObject is applied.
         """
-        for stem in ("27_wva-variantautoscaling", "28_wva-hpa"):
+        for stem in ("28_wva-scaledobject",):
             yaml_path = self._find_yaml(stack_path, stem)
             if not (yaml_path and self._has_yaml_content(yaml_path)):
                 continue
@@ -665,11 +696,12 @@ class DeployModelserviceStep(Step):
         context: ExecutionContext,
         plan_config: dict,
     ) -> None:
-        """Log the current state of this stack's VariantAutoscaling + HPA.
+        """Log the current state of this stack's KEDA ScaledObject + HPA.
 
-        Lets the standup output show what got created (VA OPTIMIZED, HPA
-        TARGETS / REPLICAS, etc.) without the operator needing a follow-up
-        ``oc get``. Best-effort - failures here don't fail step_09.
+        Lets the standup output show what got created (ScaledObject status,
+        HPA TARGETS/REPLICAS, etc.) without needing follow-up ``oc get``.
+        Best-effort - failures here don't fail step_09. KEDA's generated HPA
+        carries the same name as the ScaledObject.
         """
         wva_cfg = plan_config.get("wva", {}) or {}
         wva_ns = wva_cfg.get("namespace") or plan_config.get("namespace", {}).get(
@@ -682,7 +714,7 @@ class DeployModelserviceStep(Step):
         resource_name = f"{model_id_label}-decode"
 
         for kind, label in (
-            ("variantautoscaling.llmd.ai", "VariantAutoscaling"),
+            ("scaledobject.keda.sh", "ScaledObject"),
             ("hpa", "HorizontalPodAutoscaler"),
         ):
             result = cmd.kube(
@@ -695,8 +727,71 @@ class DeployModelserviceStep(Step):
             )
             if result.success and result.stdout.strip():
                 context.logger.log_info(f"📋 {label} state in ns/{wva_ns}:")
-                # Indent each line so it visually groups with the
-                # header above it in the standup log.
+                for line in result.stdout.rstrip().splitlines():
+                    context.logger.log_info(f"    {line}")
+            else:
+                context.logger.log_warning(
+                    f"Could not query {label}/{resource_name} for state log: "
+                    f"{result.stderr.strip()[:200] or '(empty)'}"
+                )
+
+    def _apply_epp_keda_stack_resources(
+        self,
+        cmd: CommandExecutor,
+        stack_path: Path,
+        errors: list,
+    ) -> None:
+        """Apply EPP+KEDA saturation autoscaling per-stack resources.
+
+        EPP monitoring setup (ServiceMonitor, RBAC) is installed by step_03
+        (admin prerequisites, once per namespace). Here we apply the
+        per-stack ScaledObject so KEDA can query metrics and auto-generate
+        the HPA. Multiple models scale independently via their own ScaledObjects.
+        """
+        for stem in ("30_epp-keda-saturation-scaledobject",):
+            yaml_path = self._find_yaml(stack_path, stem)
+            if not (yaml_path and self._has_yaml_content(yaml_path)):
+                continue
+            result = cmd.kube("apply", "-f", str(yaml_path))
+            if not result.success:
+                errors.append(f"Failed to apply {stem}: {result.stderr}")
+
+    def _log_epp_keda_stack_state(
+        self,
+        cmd: CommandExecutor,
+        context: ExecutionContext,
+        plan_config: dict,
+    ) -> None:
+        """Log the current state of this stack's EPP+KEDA ScaledObject + HPA.
+
+        Lets the standup output show what got created (ScaledObject
+        status, HPA TARGETS/REPLICAS, etc.) without needing follow-up ``oc get``.
+        Best-effort - failures here don't fail step_09.
+        """
+        epp_keda_cfg = plan_config.get("eppKedaSaturation", {}) or {}
+        epp_keda_ns = epp_keda_cfg.get("namespace") or plan_config.get(
+            "namespace", {}
+        ).get("name", "")
+        model_id_label = plan_config.get("model_id_label", "")
+        fma_enabled = plan_config.get("fma", {}).get("enabled", False)
+        hpa_name = f"{model_id_label}-{'fma' if fma_enabled else 'decode'}-saturation"
+
+        for label, resource_name in (
+            ("ScaledObject", hpa_name + "-saturation"),
+            ("HPA", "keda-hpa-" + hpa_name + "-saturation"),
+        ):
+            result = cmd.kube(
+                "get",
+                resource_name.split("-")[0].lower(),
+                resource_name,
+                "-n",
+                epp_keda_ns,
+                "-o",
+                "wide",
+                check=False,
+            )
+            if result.success and result.stdout.strip():
+                context.logger.log_info(f"📋 {label} state in ns/{epp_keda_ns}:")
                 for line in result.stdout.rstrip().splitlines():
                     context.logger.log_info(f"    {line}")
             else:
@@ -748,6 +843,27 @@ class DeployModelserviceStep(Step):
             params["prefill_replicas"] = str(
                 self._require_config(plan_config, "prefill", "replicas")
             )
+
+            # Accelerator model + per-role parallelism, so the benchmark report
+            # can identify the hardware and topology instead of assuming.
+            accel = plan_config.get("decode", {}).get("acceleratorType", {}) or {}
+            params["accelerator_model"] = accel.get("labelValue", "")
+            for role in ("prefill", "decode"):
+                par = plan_config.get(role, {}).get("parallelism", {}) or {}
+                for cm_key, cfg_key in (
+                    ("tensor", "tensor"),
+                    ("data", "data"),
+                    ("data_local", "dataLocal"),
+                    ("workers", "workers"),
+                ):
+                    params[f"{role}_{cm_key}_parallelism"] = str(par.get(cfg_key, 1))
+            # Gateway/LWS topology, so the report can list those components.
+            params["gateway_class"] = plan_config.get("gateway", {}).get(
+                "className", ""
+            )
+            params["multinode_enabled"] = str(
+                plan_config.get("multinode", {}).get("enabled", False)
+            ).lower()
             chart_versions = plan_config.get("chartVersions", {})
             if chart_versions:
                 params["chart_version_modelservice"] = chart_versions.get(
@@ -801,5 +917,6 @@ class DeployModelserviceStep(Step):
                     f"📋 Deployment metadata to configmap/{cm_name} in ns/{harness_ns}"
                 )
                 context.logger.log_info(
-                    f"   {cmd._kube_bin} get configmap {cm_name} -n {harness_ns} -o yaml"
+                    f"   {cmd._kube_bin} get configmap {cm_name} "
+                    f"-n {harness_ns} -o yaml"
                 )

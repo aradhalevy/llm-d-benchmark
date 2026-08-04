@@ -20,7 +20,14 @@ class VerifyModelStep(Step):
         )
 
     def should_skip(self, context: ExecutionContext) -> bool:
-        """Skip model verification in skip-run mode or fma."""
+        """Skip in skip-run mode, fma, or nok8s.
+
+        nok8s: ``test_model_serving`` probes from an in-cluster curl pod, which
+        cannot run without a cluster; standup already verified /v1/models
+        locally, so verification here would be a futile kubectl call.
+        """
+        if "nok8s" in (context.deployed_methods or []):
+            return True
         return context.harness_skip_run or is_fma_only_mode(context)
 
     def execute(
@@ -95,14 +102,23 @@ class VerifyModelStep(Step):
             cleanup_ephemeral_pods(cmd, namespace, context.logger)
 
         if error:
-            return StepResult(
-                step_number=self.number,
-                step_name=self.name,
-                success=False,
-                message=f"Model verification failed: {error}",
-                errors=[error],
-                stack_name=stack_name,
-            )
+            # An externally-provided endpoint (--endpoint-url) is probed in-cluster
+            # without credentials, so an empty/served-model mismatch is expected and
+            # non-fatal -- the harness pod's gateway holds the real credentials. The
+            # step still ran, so the harness ServiceAccount has been created.
+            if context.endpoint_url:
+                context.logger.log_info(
+                    f"Model verification non-fatal for external endpoint: {error}"
+                )
+            else:
+                return StepResult(
+                    step_number=self.number,
+                    step_name=self.name,
+                    success=False,
+                    message=f"Model verification failed: {error}",
+                    errors=[error],
+                    stack_name=stack_name,
+                )
 
         context.logger.log_info(f"Model '{model_name}' verified at {endpoint_url}")
         return StepResult(

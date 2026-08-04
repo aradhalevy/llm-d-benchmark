@@ -19,8 +19,31 @@ metrics_dir = os.environ.get("METRICS_DIR", "metrics")
 raw_dir = os.path.join(metrics_dir, "raw")
 processed_dir = os.path.join(metrics_dir, "processed")
 
-# Metrics to aggregate across all pods for cluster-wide stats
-AGGREGATE_METRICS = {
+
+def _load_time_series_metrics():
+    """Load the configured metric names passed by the harness pod."""
+    raw_value = os.environ.get("LLMDBENCH_TIME_SERIES_METRICS")
+    if not raw_value:
+        return None
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        print("Warning: LLMDBENCH_TIME_SERIES_METRICS is not valid JSON")
+        return None
+    if not isinstance(value, list):
+        print("Warning: LLMDBENCH_TIME_SERIES_METRICS must be a JSON list")
+        return None
+    return [name for name in value if isinstance(name, str) and name]
+
+
+TIME_SERIES_METRICS = _load_time_series_metrics()
+TIME_SERIES_METRIC_SET = (
+    set(TIME_SERIES_METRICS) if TIME_SERIES_METRICS is not None else None
+)
+
+# Legacy aggregation defaults used when the script is run without a rendered
+# monitoring.timeSeriesMetrics configuration.
+LEGACY_AGGREGATE_METRICS = {
     "vllm:kv_cache_usage_perc",
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
@@ -33,6 +56,11 @@ AGGREGATE_METRICS = {
     "inference_pool_average_running_requests",
     "inference_pool_ready_pods",
 }
+AGGREGATE_METRICS = (
+    TIME_SERIES_METRIC_SET
+    if TIME_SERIES_METRIC_SET is not None
+    else LEGACY_AGGREGATE_METRICS
+)
 
 # Ratio metrics: (output_name, numerator_metric, denominator_metric)
 RATIO_METRICS = [
@@ -47,6 +75,11 @@ RATIO_METRICS = [
         "vllm:external_prefix_cache_queries_total",
     ),
 ]
+RATIO_INPUT_METRICS = {
+    metric_name
+    for _, numerator_metric, denominator_metric in RATIO_METRICS
+    for metric_name in (numerator_metric, denominator_metric)
+}
 
 # Metric name -> unit mapping
 METRIC_UNITS = {
@@ -227,6 +260,12 @@ def aggregate_metrics():
 
     all_files = glob.glob(os.path.join(raw_dir, "*_metrics.log"))
 
+    if TIME_SERIES_METRICS is not None:
+        _save_json(
+            os.path.join(processed_dir, "time_series_metrics.json"),
+            TIME_SERIES_METRICS,
+        )
+
     if not all_files:
         print("Warning: No raw files found to process")
         print(f"Checked directory: {raw_dir}")
@@ -258,11 +297,21 @@ def aggregate_metrics():
             pod_metadata[pod_name]["files"].append(os.path.basename(file_path))
 
             for metric_name, values in metrics.items():
-                pod_metrics[pod_name][metric_name].extend(values)
+                if (
+                    TIME_SERIES_METRIC_SET is None
+                    or metric_name in TIME_SERIES_METRIC_SET
+                    or metric_name in RATIO_INPUT_METRICS
+                ):
+                    pod_metrics[pod_name][metric_name].extend(values)
 
     # Compute ratio metrics per-pod before aggregation
     for pod_name, metrics in pod_metrics.items():
         for ratio_name, num_metric, den_metric in RATIO_METRICS:
+            if (
+                TIME_SERIES_METRIC_SET is not None
+                and ratio_name not in TIME_SERIES_METRIC_SET
+            ):
+                continue
             if num_metric in metrics and den_metric in metrics:
                 num_vals = metrics[num_metric]
                 den_vals = metrics[den_metric]
@@ -282,6 +331,7 @@ def aggregate_metrics():
                 name: _compute_stats(values, METRIC_UNITS.get(name, ""))
                 for name, values in metrics.items()
                 if values
+                and (TIME_SERIES_METRIC_SET is None or name in TIME_SERIES_METRIC_SET)
             },
         }
 
@@ -328,6 +378,41 @@ def aggregate_pod_startup_stats():
     )
 
 
+def aggregate_requester_startup_stats():
+    """Aggregate creation->Ready for runtime FMA requester pods.
+
+    FMA requester pod goes Ready only when its bound vLLM is serving, so this is
+    FMA's "Avg pod startup" (time to serving)."""
+    startup_file = os.path.join(processed_dir, "pod_startup_times.json")
+    data = _load_json(startup_file) or {}
+    if not data.get("pods"):
+        return
+    ts_data = _load_json(os.path.join(processed_dir, "replica_status_timeseries.json"))
+    snaps = (ts_data or {}).get("snapshots", [])
+    run_start = snaps[0].get("timestamp") if snaps else None
+
+    values = []
+    for p in data.get("pods", []):
+        if p.get("role") != "requester":
+            continue
+        s = p.get("startup_seconds")
+        if not isinstance(s, (int, float)):
+            continue
+        ready = p.get("ready_timestamp")
+        if run_start and ready and ready < run_start:
+            continue  # standup requester -- ignore
+        values.append(s)
+    if not values:
+        return
+
+    data["requester_runtime_aggregate"] = _compute_stats(values, "s")
+    _save_json(startup_file, data)
+    print(
+        f"Requester run-time startup: {len(values)} pods, "
+        f"mean={data['requester_runtime_aggregate']['mean']:.1f}s"
+    )
+
+
 def aggregate_replica_stats():
     """Compute aggregate statistics from replica status time series."""
     ts_data = _load_json(os.path.join(processed_dir, "replica_status_timeseries.json"))
@@ -356,4 +441,5 @@ def aggregate_replica_stats():
 if __name__ == "__main__":
     aggregate_metrics()
     aggregate_pod_startup_stats()
+    aggregate_requester_startup_stats()
     aggregate_replica_stats()

@@ -1,8 +1,7 @@
 """Step 02a -- Wait for FMA launcher pool to warm up before benchmarking.
 
-Mirrors Braulio's pattern in llm-d-fast-model-actuation PR #579: after
-standup completes, deliberately wait for the fma-requester Deployment to
-become ``Available`` (i.e. at least one launcher is bound and its vLLM
+Wait for the fma-requester Deployment to become ``Available``
+(i.e. at least one launcher is bound and its vLLM
 container is fully initialized) before driving load.
 
 Why this lives in the run phase rather than at the end of standup: HPA
@@ -16,9 +15,13 @@ benchmark".
 
 Skipped when ``fma.enabled`` is false or no requester deployment was
 rendered (``fma.requester.replicas == 0``).
+
+A scenario may select an alternate warmup by setting the top-level
+``fmaWarmupStep`` key; ``step_02a_fma_warmup_hotstart`` delegates to
+:class:`FMAWarmupHotStartStep` (load all launchers, scale down to a sleeping
+vLLM, then benchmark scales back up).
 """
 
-import time
 from pathlib import Path
 
 from llmdbenchmark.executor.step import Step, StepResult, Phase
@@ -55,6 +58,24 @@ class FMAWarmupStep(Step):
         plan_config = self._load_stack_config(stack_path)
         stack_name = stack_path.name
 
+        # Per-stack warmup-variant dispatch. A scenario can opt into an
+        # alternate warmup by setting the top-level `fmaWarmupStep` key (it
+        # survives rendering into config.yaml via the plain deep-merge in
+        # render_plans.py, and the root config schema is extra="allow").
+        # `get_run_steps()` registers a single step-02a for the whole run, so
+        # the selection has to happen here at execute time where we have the
+        # per-stack config in hand. Hot-start loads all launchers, then scales
+        # the requester Deployment down to minReplicas so the extra launchers
+        # hold a sleeping vLLM (model in memory) before the benchmark drives
+        # scale-up 1->N.
+        warmup_step = self._resolve(plan_config, "fmaWarmupStep", default="")
+        if warmup_step == "step_02a_fma_warmup_hotstart":
+            from llmdbenchmark.run.steps.step_02a_fma_warmup_hotstart import (
+                FMAWarmupHotStartStep,
+            )
+
+            return FMAWarmupHotStartStep().execute(context, stack_path)
+
         if not self._resolve(plan_config, "fma.enabled", default=False):
             return StepResult(
                 step_number=self.number,
@@ -62,6 +83,45 @@ class FMAWarmupStep(Step):
                 success=True,
                 message="fma.enabled is false; skipping warmup",
                 stack_name=stack_name,
+            )
+
+        cmd = context.require_cmd()
+        namespace = context.require_namespace()
+        model_id_label = plan_config.get("model_id_label", "")
+        if not model_id_label:
+            return StepResult(
+                step_number=self.number,
+                step_name=self.name,
+                success=False,
+                message="model_id_label missing from plan_config",
+                errors=["model_id_label is required for FMA warmup"],
+                stack_name=stack_name,
+            )
+
+        timeout = int(self._resolve(plan_config, "fma.warmupTimeout", default=300))
+
+        # Stage 0: Wait for the launcher pods' to reach the
+        # Ready condition so the requester scale-up doesn't race launcher
+        # container startup (image pull + launcher.py bind).
+        launcher_selector = (
+            f"stood-up-via=fma,"
+            f"dual-pods.llm-d.ai/launcher-config-name=fma-{model_id_label}"
+        )
+        context.logger.log_info(
+            f"⏳ FMA warmup: waiting up to {timeout}s for launcher pods "
+            f"({launcher_selector}) to be Ready in ns/{namespace}"
+        )
+        launcher_wait = cmd.wait_for_pods(
+            label=launcher_selector,
+            namespace=namespace,
+            timeout=timeout,
+            poll_interval=10,
+            description=f"FMA launchers ready (model={model_id_label})",
+        )
+        if not launcher_wait.success:
+            context.logger.log_warning(
+                f"FMA warmup: launcher pods not all Ready within {timeout}s in "
+                f"ns/{namespace}. {launcher_wait.stderr.strip()[:200]}"
             )
 
         replicas = int(
@@ -79,28 +139,10 @@ class FMAWarmupStep(Step):
                 stack_name=stack_name,
             )
 
-        cmd = context.require_cmd()
-        namespace = context.require_namespace()
-        model_id_label = plan_config.get("model_id_label", "")
-        if not model_id_label:
-            return StepResult(
-                step_number=self.number,
-                step_name=self.name,
-                success=False,
-                message="model_id_label missing from plan_config",
-                errors=["model_id_label is required for FMA warmup"],
-                stack_name=stack_name,
-            )
-
-        deploy_name = f"fma-requester-{model_id_label}"
-        timeout = int(self._resolve(plan_config, "fma.warmupTimeout", default=600))
-        buffer_seconds = int(
-            self._resolve(plan_config, "fma.warmupBufferSeconds", default=0)
-        )
-
         # Stage 1: kubectl wait Deployment Available. With replicas=N, this
         # succeeds when N requester pods are Ready -- i.e. N launchers have
-        # vLLM serving. Same gate Braulio uses in PR #579's demo script.
+        # vLLM serving.
+        deploy_name = f"fma-requester-{model_id_label}"
         context.logger.log_info(
             f"⏳ FMA warmup: waiting up to {timeout}s for Deployment/"
             f"{deploy_name} to become Available in ns/{namespace}"
@@ -127,31 +169,10 @@ class FMAWarmupStep(Step):
                 stack_name=stack_name,
             )
 
-        # Stage 2: optional buffer sleep so off-axis launchers (the ones
-        # NOT bound to the initial requester replicas) finish loading model
-        # weights before HPA scale-up fires. With launcher-populator
-        # creating one launcher per node and only `replicas` of them bound
-        # initially, the rest are still in vLLM-startup at end of stage 1
-        # and scale-up to maxReplicas would race them. 0 = opt-out (matches
-        # Braulio's demo, which doesn't add a buffer).
-        if buffer_seconds > 0:
-            context.logger.log_info(
-                f"⏳ FMA warmup: sleeping {buffer_seconds}s buffer for "
-                f"off-axis launcher vLLM init to complete"
-            )
-            time.sleep(buffer_seconds)
-
         return StepResult(
             step_number=self.number,
             step_name=self.name,
             success=True,
-            message=(
-                f"FMA warmup: Deployment/{deploy_name} Available"
-                + (
-                    f" (+ {buffer_seconds}s off-axis-launcher buffer)"
-                    if buffer_seconds > 0
-                    else ""
-                )
-            ),
+            message=(f"FMA warmup: Deployment/{deploy_name} Available"),
             stack_name=stack_name,
         )

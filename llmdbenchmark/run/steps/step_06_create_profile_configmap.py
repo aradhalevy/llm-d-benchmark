@@ -13,7 +13,7 @@ HARNESS_SCRIPTS_CONFIGMAP = "llmdbench-harness-scripts"
 # across stacks. Under `run --parallel >1` the per-stack threads would race on
 # the same names + local temp files (one stack fails with "Failed to create one
 # or more ConfigMaps"). Serialize just the create here; the parallel *load* still
-# runs simultaneously. Global lock is fine — creation takes a couple seconds.
+# runs simultaneously. Global lock is fine -- creation takes a couple seconds.
 _CM_CREATE_LOCK = threading.Lock()
 
 
@@ -28,6 +28,11 @@ class CreateProfileConfigmapStep(Step):
             phase=Phase.RUN,
             per_stack=True,
         )
+
+    def should_skip(self, context: ExecutionContext) -> bool:
+        # nok8s runs the harness as a local container with profiles and
+        # scripts bind-mounted from disk -- no ConfigMaps needed.
+        return "nok8s" in (context.deployed_methods or [])
 
     def execute(
         self, context: ExecutionContext, stack_path: Path | None = None
@@ -77,14 +82,22 @@ class CreateProfileConfigmapStep(Step):
 
         # Serialize creation across parallel stack threads (see _CM_CREATE_LOCK).
         with _CM_CREATE_LOCK:
-            profile_ok, profile_msg = self._create_profiles_configmap(
-                context,
-                cmd,
-                harness_name,
-                harness_ns,
-            )
-            if not profile_ok:
-                errors.append(profile_msg)
+            if context.harness_debug:
+                profile_results = self._create_debug_profiles_configmaps(
+                    context,
+                    cmd,
+                    harness_ns,
+                )
+                errors.extend(msg for ok, msg in profile_results if not ok)
+            else:
+                profile_ok, profile_msg = self._create_profiles_configmap(
+                    context,
+                    cmd,
+                    harness_name,
+                    harness_ns,
+                )
+                if not profile_ok:
+                    errors.append(profile_msg)
 
             scripts_ok, scripts_msg = self._create_harness_scripts_configmap(
                 context,
@@ -162,6 +175,42 @@ class CreateProfileConfigmapStep(Step):
             )
         return ok, msg
 
+    def _create_debug_profiles_configmaps(
+        self,
+        context,
+        cmd,
+        harness_ns: str,
+    ) -> list[tuple[bool, str]]:
+        """Create one profiles ConfigMap per rendered harness in debug mode."""
+        profiles_root = context.workload_profiles_dir()
+        if not profiles_root.is_dir():
+            return [
+                (
+                    False,
+                    f"No rendered profiles found in {profiles_root}. "
+                    f"Run render_profiles first.",
+                )
+            ]
+
+        results: list[tuple[bool, str]] = []
+        for profiles_dir in sorted(profiles_root.iterdir()):
+            if not profiles_dir.is_dir():
+                continue
+            if not any(path.is_file() for path in profiles_dir.iterdir()):
+                continue
+            results.append(
+                self._create_profiles_configmap(
+                    context,
+                    cmd,
+                    profiles_dir.name,
+                    harness_ns,
+                )
+            )
+
+        if not results:
+            results.append((False, f"No profile directories in {profiles_root}"))
+        return results
+
     def _create_harness_scripts_configmap(
         self,
         context,
@@ -171,6 +220,7 @@ class CreateProfileConfigmapStep(Step):
         """Create the llmdbench-harness-scripts ConfigMap from workload/harnesses/."""
         base_dir = context.base_dir or Path(__file__).resolve().parents[3]
         harnesses_dir = base_dir / "workload" / "harnesses"
+        analyzers_dir = base_dir / "llmdbenchmark" / "analysis" / "scripts"
 
         if not harnesses_dir.is_dir():
             return False, (f"Harness scripts directory not found: {harnesses_dir}")
@@ -183,6 +233,22 @@ class CreateProfileConfigmapStep(Step):
                     f"--from-file={script_file.name}={script_file}",
                 )
                 script_count += 1
+
+        # Harness scripts are intentionally supplied from the checked-out
+        # repository so a run can use a new/updated harness with an older
+        # benchmark image. Keep its matching analyzers on the same update path;
+        # otherwise the launcher finds the new harness but fails when the
+        # analyzer is absent from the image (for example, lm-eval on v0.7.0).
+        if analyzers_dir.is_dir():
+            for analyzer_file in sorted(analyzers_dir.iterdir()):
+                if analyzer_file.is_file() and (
+                    analyzer_file.name.endswith("-analyze_results.sh")
+                    or analyzer_file.name.endswith("-analyze_results.py")
+                ):
+                    from_file_args.append(
+                        f"--from-file={analyzer_file.name}={analyzer_file}",
+                    )
+                    script_count += 1
 
         if script_count == 0:
             return False, f"No harness scripts found in {harnesses_dir}"
@@ -214,7 +280,7 @@ class CreateProfileConfigmapStep(Step):
         namespace: str,
         context,
     ) -> tuple[bool, str]:
-        """Create a ConfigMap via kubectl create --dry-run | kubectl apply."""
+        """Create a ConfigMap via kubectl create --dry-run | server-side apply."""
         cm_yaml_path = context.run_dir() / f"{name}.yaml"
 
         result = cmd.kube(
@@ -238,6 +304,7 @@ class CreateProfileConfigmapStep(Step):
 
         result = cmd.kube(
             "apply",
+            "--server-side",
             "-f",
             str(cm_yaml_path),
             "--namespace",
