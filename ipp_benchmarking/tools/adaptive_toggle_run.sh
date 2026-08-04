@@ -25,7 +25,7 @@
 # inference-perf-profiles ConfigMap in its harness namespace, so two runs sharing one namespace
 # truncate each other. Model/endpoint discovery still targets $NS.
 #
-# PREREQS (see adaptive-routing-experiment.md): standup (2-stack scenario) + IPP (-expl values) +
+# PREREQS (see README.md section 3): standup (2-stack scenario) + IPP (-expl values) +
 # base-model ConfigMaps + gen_httproutes.sh. Then: adaptive_toggle_run.sh [tag]
 set -u
 TAG="${1:-adaptive}"

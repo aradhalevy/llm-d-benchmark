@@ -113,8 +113,8 @@ def parse(path, split_model=False):
                 continue
             k = r.get("model", "") if split_model else ""
             m = r.get("msg")
-            if m in ("queue-ttft score", "ttft-aware score") and "effectiveTTFT" in r:
-                pred[k].append((r["ts"], r["effectiveTTFT"]))
+            if m in ("queue-ttft score", "ttft-aware score") and ("effectiveTTFT" in r or "predictedTTFT" in r):
+                pred[k].append((r["ts"], r.get("effectiveTTFT", r.get("predictedTTFT"))))
             elif m == "ttft-observation" and "ttft_s" in r:
                 act[k].append((r["ts"], r["ttft_s"]))
     return {k: (np.array(pred.get(k, [])), np.array(act.get(k, [])))
