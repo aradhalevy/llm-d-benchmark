@@ -971,9 +971,7 @@ def _do_run(args, logger, render_plan_errors, experiment_file_override=None):
         steps=get_run_steps(),
         context=context,
         logger=logger,
-        # ponytail: was hardcoded 1 (sequential). Honor --parallel like standup
-        # so a single multi-stack run can drive all models simultaneously.
-        max_parallel_stacks=getattr(args, "parallel", 1),
+        max_parallel_stacks=1,
     )
 
     step_spec = getattr(args, "step", None)

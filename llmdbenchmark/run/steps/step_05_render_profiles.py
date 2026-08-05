@@ -66,9 +66,6 @@ class RenderProfilesStep(Step):
         workload_file_path = getattr(context, "workload_file_path", None)
         source_profile_file: Path | None = None
         profiles_source: Path | None = None
-        # ipp_benchmarking bundle overlay, searched after the standard location
-        # so bundle profiles resolve without copying them into workload/profiles/.
-        profiles_overlay: Path | None = None
         if workload_file_path:
             source_profile_file = Path(workload_file_path).expanduser()
             if not source_profile_file.is_absolute():
@@ -96,10 +93,6 @@ class RenderProfilesStep(Step):
                     errors=errors,
                     stack_name=stack_name,
                 )
-            overlay = (
-                base_dir / "ipp_benchmarking" / "workload" / "profiles" / harness_name
-            )
-            profiles_overlay = overlay if overlay.is_dir() else None
 
         # CLI flags and runtime values override plan_config defaults
         runtime_values: dict[str, str] = {
@@ -160,10 +153,8 @@ class RenderProfilesStep(Step):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy all profiles to output first (non-.yaml.in files are copied as-is)
-        for src_dir in (profiles_source, profiles_overlay):
-            if src_dir is None:
-                continue
-            for src_file in src_dir.iterdir():
+        if profiles_source is not None:
+            for src_file in profiles_source.iterdir():
                 if src_file.is_file() and not src_file.name.endswith(".yaml.in"):
                     shutil.copy2(src_file, output_dir / src_file.name)
 
@@ -173,7 +164,7 @@ class RenderProfilesStep(Step):
         if not treatments:
             # Single default treatment -- render the profile as-is
             source_file = self._resolve_source_file(
-                profile_name, profiles_source, profiles_overlay, source_profile_file
+                profile_name, profiles_source, source_profile_file
             )
             if source_file is not None:
                 # Determine output name (strip .in if present)
@@ -202,10 +193,7 @@ class RenderProfilesStep(Step):
                 treatment_overrides = treatment.get("overrides", {})
 
                 source_file = self._resolve_source_file(
-                    profile_name,
-                    profiles_source,
-                    profiles_overlay,
-                    source_profile_file,
+                    profile_name, profiles_source, source_profile_file
                 )
                 if source_file is None:
                     errors.append(
@@ -346,18 +334,21 @@ class RenderProfilesStep(Step):
         self,
         profile_name: str,
         profiles_source: Path | None,
-        profiles_overlay: Path | None,
         source_profile_file: Path | None,
     ) -> Path | None:
         if source_profile_file is not None:
             return source_profile_file
 
-        for src_dir in (profiles_source, profiles_overlay):
-            if src_dir is None:
-                continue
-            for candidate in (src_dir / profile_name, src_dir / f"{profile_name}.in"):
-                if candidate.exists():
-                    return candidate
+        if profiles_source is None:
+            return None
+
+        source_file = profiles_source / profile_name
+        if source_file.exists():
+            return source_file
+
+        source_file = profiles_source / f"{profile_name}.in"
+        if source_file.exists():
+            return source_file
 
         return None
 
