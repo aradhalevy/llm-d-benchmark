@@ -17,10 +17,10 @@
 # IPP model-selector rewrites the request body `model` to the picked alias, so vLLM MUST
 # serve that alias -- hence both pools serve {real, -a, -b}.
 #
-#   llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool standup -p llm-d-arad
+#   llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool standup -p <your-namespace>
 #   # deploy IPP (ipp_configs/dual-pool-smart-values.yaml), apply the two base-model
 #   # ConfigMaps, then drive the three arms with tools/ab_pool_split_run.sh
-#   llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool teardown -p llm-d-arad
+#   llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool teardown -p <your-namespace>
 #
 # Cluster: OpenShift + NVIDIA GPU Operator, 5x H100 80GB (1 GPU/pod). HF_TOKEN in env.
 
@@ -28,10 +28,8 @@
 # SHARED -- merged into every stack before per-stack overrides
 # ============================================================================
 shared:
-  affinity:
-    enabled: true
-    nodeSelector:
-      nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+  # GPU placement comes from accelerator auto-detection. To pin a SKU, set
+  # affinity.enabled: true + nodeSelector: {nvidia.com/gpu.product: <label>}.
 
   accelerator:
     count: 1
@@ -117,7 +115,7 @@ shared:
 
   harness:
     name: inference-perf
-    experimentProfile: sweep_8stage.yaml
+    experimentProfile: poisson_rps_pyramid.yaml
     resources:
       cpu: "8"
       memory: 32Gi

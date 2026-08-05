@@ -30,7 +30,7 @@
 set -u
 TAG="${1:-adaptive}"
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-NS="${NAMESPACE:-llm-d-arad}"; DAP=access-to-harness-data-workload-pvc
+NS="${NAMESPACE:?set NAMESPACE to your namespace}"; DAP=access-to-harness-data-workload-pvc
 SPEC=cicd/ocp-gemma-qwen-adaptive-run     # single stack -> one execution per run
 ROOT="$REPO/ipp_benchmarking/example_outputs/gemma-qwen-adaptive/$TAG"
 SHARED=adaptive_shared_summarization.yaml

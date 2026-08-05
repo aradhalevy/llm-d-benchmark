@@ -22,8 +22,10 @@ provider:
     responseBody: true
 payloadProcessor:
   image:
-    # ghcr.io/mohammad-nassar10/llm-d-inference-payload-processor:ttft-aware-p25-expl
-    registry: ghcr.io/mohammad-nassar10
+    # <your-registry>/llm-d-inference-payload-processor:ttft-aware-p25-expl
+    # Build the IPP yourself and supply your own registry, e.g.
+    #   --set payloadProcessor.image.registry=ghcr.io/<you>
+    # The tag below names the IPP build this arm requires.
     repository: llm-d-inference-payload-processor
     tag: ttft-aware-p25-expl
     pullPolicy: Always

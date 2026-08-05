@@ -1,41 +1,48 @@
 #!/usr/bin/env python3
-"""Summarizer routing breakdown from IPP "Model selected" decision lines.
+"""Routing breakdown from IPP "Model selected" decision lines.
 
-Single-model arms send everything to their one model; the smart arm splits 8B/32B.
-Input may contain duplicate lines (rolling-snapshot capture overlaps) -> dedup by
+Models come from each line's `model` field, so this works for any experiment
+(8B/32B, the dual-pool -a/-b aliases, the Kind sims, gemma/qwen). Input may
+contain duplicate lines (rolling-snapshot capture overlaps) -> dedup by
 x-request-id.  usage: analyze_routing.py <log>
 """
-import sys, json, re
+import sys, json
 
 log = sys.argv[1]
 sel, ts = {}, {}
 for line in open(log, errors="ignore"):
     if '"msg":"Model selected"' not in line:
         continue
-    try: d = json.loads(line)
-    except: continue
-    rid = d.get("x-request-id")
-    m = "32B" if "Qwen3-32B" in line else ("8B" if "Qwen3-8B" in line else None)
-    if not rid or not m: continue
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    rid, m = d.get("x-request-id"), d.get("model")
+    if not rid or not m:
+        continue
     sel[rid] = m
-    mt = re.search(r'"ts":([0-9.]+)', line)
-    ts[rid] = float(mt.group(1)) if mt else 0.0
+    ts[rid] = float(d.get("ts", 0.0))
 
-T8 = sum(1 for m in sel.values() if m == "8B")
-T32 = sum(1 for m in sel.values() if m == "32B")
-tot = T8 + T32 or 1
-print(f"summarizer decisions: {T8+T32}   8B={T8} ({100*T8/tot:.1f}%)   32B={T32} ({100*T32/tot:.1f}%)")
+models = sorted({m for m in sel.values()})
+tot = len(sel) or 1
+n_of = lambda rows, m: sum(1 for _, mm in rows if mm == m)
+print(f"routing decisions: {len(sel)}   " + "   ".join(
+    f"{m}={sum(1 for v in sel.values() if v == m)} "
+    f"({100*sum(1 for v in sel.values() if v == m)/tot:.1f}%)" for m in models))
 
 # per-stage split: cluster by idle gaps
 rows = sorted((ts[r], sel[r]) for r in sel)
-if rows:
+if rows and models:
     stages, cur = [], [rows[0]]
     for prev, r in zip(rows, rows[1:]):
-        if r[0] - prev[0] > 8: stages.append(cur); cur = []
+        if r[0] - prev[0] > 8:
+            stages.append(cur)
+            cur = []
         cur.append(r)
     stages.append(cur)
-    print("\nper-stage 8B/32B split:")
-    print(f"  {'stage':>5s} {'n':>6s} {'8B':>6s} {'8B%':>6s} {'32B':>6s} {'32B%':>6s}")
+    print("\nper-stage split:")
+    print(f"  {'stage':>5s} {'n':>6s}" + "".join(f" {m[-16:]:>16s} {'%':>6s}" for m in models))
     for i, s in enumerate([s for s in stages if len(s) >= 20]):
-        n = len(s); b = sum(1 for _, mm in s if mm == "32B"); e = n - b
-        print(f"  {i:>5d} {n:6d} {e:6d} {100*e/n:5.1f}% {b:6d} {100*b/n:5.1f}%")
+        n = len(s)
+        print(f"  {i:>5d} {n:6d}" + "".join(
+            f" {n_of(s, m):16d} {100*n_of(s, m)/n:5.1f}%" for m in models))

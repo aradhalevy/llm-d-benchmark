@@ -4,12 +4,12 @@
 # the full IPP log live, collects logs + slim extract. Install the matching IPP values BEFORE
 # each arm (helm upgrade -f ...): weighted arms -> dual-pool-weighted-values.yaml (1 model,
 # pass-through); smart arm -> dual-pool-smart-values.yaml (2 aliases + scorer).
-#   NAMESPACE=llm-d-arad-2 ab_pool_split_run.sh <arm> <route-mode> [profile=sweep_8stage.yaml]
+#   NAMESPACE=<your-namespace> ab_pool_split_run.sh <arm> <route-mode> [profile=poisson_rps_pyramid.yaml]
 #     route-mode: w5050 (A50/B50) | w4060 (A40/B60, pod-ratio optimal) | w6040 (A60/B40) | smart (IPP scorer)
 set -u
-ARM="${1:?arm}"; MODE="${2:?route-mode: w5050|smart|w6040}"; PROFILE="${3:-sweep_8stage.yaml}"
-REPO=/home/arad/new_git_repos/benchmark_try/llm-d-benchmark
-NS="${NAMESPACE:-llm-d-arad-2}"; DAP=access-to-harness-data-workload-pvc
+ARM="${1:?arm}"; MODE="${2:?route-mode: w5050|smart|w6040}"; PROFILE="${3:-poisson_rps_pyramid.yaml}"
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+NS="${NAMESPACE:?set NAMESPACE to your namespace}"; DAP=access-to-harness-data-workload-pvc
 MA=Qwen/Qwen3-8B-a; MB=Qwen/Qwen3-8B-b
 D=ipp_benchmarking/example_outputs/ocp-qwen3-8b-dual-pool
 DEST=$REPO/$D/$ARM
@@ -78,7 +78,7 @@ touch "$STOP"; sleep 25; kill $N3 2>/dev/null
 # 5. Collect stage/summary/per-request from the WORKLOAD PVC. On OCP the harness writes
 #    results to workload-pvc (seen as /requests in the data-access pod), NOT to the local
 #    render workspace -- so discover the results dir via the DAP, not via find on $SWS.
-SWS=$(grep -oE '/tmp/workspace_llmdbench_[^/]+/arad-[0-9-]+' /tmp/aps_${ARM}_summ.log | head -1)
+SWS=$(grep -oE '/tmp/workspace_llmdbench_[^/]+/[[:alnum:]_.-]+-[0-9]{8}-[0-9]+-[0-9]+' /tmp/aps_${ARM}_summ.log | head -1)
 # DAP is force-deleted at run start & llmdbench may not leave it -> recreate from the plan manifest.
 if ! oc get pod -n $NS $DAP >/dev/null 2>&1; then
   APM=$(find "$SWS" -name 06_pod_access_to_harness_data.yaml 2>/dev/null | head -1)

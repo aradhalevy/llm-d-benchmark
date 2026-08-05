@@ -4,13 +4,13 @@
 # request_success_total across each pool's decode pods). Verifies the weight split works
 # BEFORE committing to a full run. Assumes standup + IPP (dual-pool-weighted-values.yaml)
 # are already up and both pools' decode pods are Running.
-#   NAMESPACE=llm-d-arad-2 smoke_route_split.sh [N=20] [weightA=1] [weightB=1]
+#   NAMESPACE=<your-namespace> smoke_route_split.sh [N=20] [weightA=1] [weightB=1]
 set -u
 N="${1:-20}"; WA="${2:-1}"; WB="${3:-1}"
-NS="${NAMESPACE:-llm-d-arad-2}"
-REPO=/home/arad/new_git_repos/benchmark_try/llm-d-benchmark
+NS="${NAMESPACE:?set NAMESPACE to your namespace}"
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
 MA=Qwen/Qwen3-8B-a; MB=Qwen/Qwen3-8B-b
-GW=infra-llmdbench-inference-gateway-istio   # Istio creates the Service with a -istio suffix
+GW="${GATEWAY:-infra-llmdbench-inference-gateway}-istio"   # Istio creates the Service with a -istio suffix
 cd "$REPO"
 
 idlabel() { local m="${1//\//-}"; m="${m//./-}"

@@ -16,11 +16,11 @@
 # single-stack RUN variant cicd/ocp-qwen3-8b-32b-summarizer (one harness; IPP routes
 # across both pools regardless of which model the request names).
 #
-#   llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p llm-d-arad
+#   llmdbenchmark --spec cicd/ocp-qwen3-8b-32b standup -p <your-namespace>
 #   # ... deploy IPP, patch --max-model-len, apply configmaps+httproutes (IPP_INSTRUCTIONS) ...
 #   llmdbenchmark --spec cicd/ocp-qwen3-8b-32b-summarizer run -l inference-perf \
-#       -w summarization_concurrency_8b32b.yaml
-#   llmdbenchmark --spec cicd/ocp-qwen3-8b-32b teardown -p llm-d-arad
+#       -w sweep_8stage_poisson.yaml
+#   llmdbenchmark --spec cicd/ocp-qwen3-8b-32b teardown -p <your-namespace>
 #
 # Cluster: OpenShift + NVIDIA GPU Operator, 2x H100 80GB (1 GPU/pod). HF_TOKEN in env.
 
@@ -28,10 +28,8 @@
 # SHARED -- merged into every stack before per-stack overrides
 # ============================================================================
 shared:
-  affinity:
-    enabled: true
-    nodeSelector:
-      nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+  # GPU placement comes from accelerator auto-detection. To pin a SKU, set
+  # affinity.enabled: true + nodeSelector: {nvidia.com/gpu.product: <label>}.
 
   accelerator:
     count: 1
@@ -111,7 +109,7 @@ shared:
 
   harness:
     name: inference-perf
-    experimentProfile: summarization_concurrency_8b32b.yaml
+    experimentProfile: sweep_8stage_poisson.yaml
     resources:
       cpu: "8"
       memory: 32Gi

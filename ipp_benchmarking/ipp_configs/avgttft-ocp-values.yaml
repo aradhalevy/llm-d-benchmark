@@ -9,7 +9,9 @@ inferenceGateway:
   name: infra-llmdbench-inference-gateway
 payloadProcessor:
   image:
-    registry: ghcr.io/aradhalevy
+    # Build the IPP yourself and supply your own registry, e.g.
+    #   --set payloadProcessor.image.registry=ghcr.io/<you>
+    # The tag below names the IPP build this arm requires.
     tag: tracechunk           # avg-ttft build, reduced logs
     pullPolicy: Always
   flags:

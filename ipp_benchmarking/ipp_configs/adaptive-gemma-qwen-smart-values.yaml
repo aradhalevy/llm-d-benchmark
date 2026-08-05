@@ -15,11 +15,13 @@ provider:
     responseBody: true
 payloadProcessor:
   image:
-    # ghcr.io/mohammad-nassar10/llm-d-inference-payload-processor:ttft-aware-p25-expl
+    # <your-registry>/llm-d-inference-payload-processor:ttft-aware-p25-expl
     # Rebuilt with the per-chunk log flood demoted, so --v=4 now yields the scorer/routing lines
     # without ~99.8% "Incoming response body chunk" noise. pullPolicy Always: the tag is mutable,
     # so a rollout restart is what actually picks the new build up.
-    registry: ghcr.io/mohammad-nassar10
+    # Build the IPP yourself and supply your own registry, e.g.
+    #   --set payloadProcessor.image.registry=ghcr.io/<you>
+    # The tag below names the IPP build this arm requires.
     repository: llm-d-inference-payload-processor
     tag: ttft-aware-p25-expl
     pullPolicy: Always

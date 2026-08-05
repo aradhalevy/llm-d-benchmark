@@ -1,13 +1,19 @@
 # IPP benchmarking
 
 Measure how IPP routing changes latency and throughput: a load-aware **smart**
-scorer vs. a static or random baseline. Three experiments below.
+scorer vs. a static or random baseline. Four experiments below.
 
 This uses `llmdbenchmark` (the repo this lives in). Detailed instructions on how to use that are in the main [README](../README.md) of the repo.
 
 Run `llmdbenchmark` **from the repo root** — it auto-discovers this bundle's
-scenarios, specs and profiles. Plotters need matplotlib/numpy, so run them with
-`.venv/bin/python3`.
+scenarios and specs. The workload profiles live in `workload/profiles/` at the
+repo root and resolve by bare name (`-w`). Plotters need matplotlib/numpy, so
+run them with `.venv/bin/python3`.
+
+The run drivers in `tools/` require `NAMESPACE` to be exported and source an
+optional gitignored `.env` from the repo root (put `HF_TOKEN` there). Nothing is
+pinned to a machine, cluster or GPU model: paths derive from the script location
+and the GPU node label is auto-detected.
 
 Troubleshooting, gotchas and findings live in [`AGENTS.md`](./AGENTS.md).
 
@@ -45,10 +51,11 @@ kind load docker-image ghcr.io/<you>/llm-d-inference-payload-processor:ttft-scor
 ./install.sh && source .venv/bin/activate
 llmdbenchmark --spec cicd/kind-sim-multi standup -p llmdbench
 
-# values file carries the plugin pipeline, listModels and image wiring -- set
-# payloadProcessor.image.registry in it to your own
+# values file carries the plugin pipeline and listModels; it pins only the image
+# TAG, so supply your own registry (the values files ship no registry on purpose)
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
-  -n llmdbench -f ipp_benchmarking/ipp_configs/kind-sim-smart-values.yaml
+  -n llmdbench -f ipp_benchmarking/ipp_configs/kind-sim-smart-values.yaml \
+  --set payloadProcessor.image.registry=ghcr.io/<you>
 kubectl rollout restart deploy/payload-processor -n llmdbench   # config-only upgrades don't restart it
 kubectl apply -n llmdbench -f ipp_benchmarking/ipp_configs/opt-125m-base-model.yaml \
                            -f ipp_benchmarking/ipp_configs/opt-350m-base-model.yaml
@@ -68,15 +75,19 @@ llmdbenchmark --spec cicd/kind-sim-multi teardown -p llmdbench
 helm uninstall payload-processor -n llmdbench                 # IPP isn't torn down automatically
 ```
 
-**Plot** — both plotters accept an arm dir or a whole `collected-logs-<N>/` bundle:
+**Plot** — the shared RPS plotters read the requested rate from each stage file,
+so they work on a Kind run unchanged. Arms are `label=dir`, where dir is a single
+run's results dir; inside a `collected-logs-<N>/` bundle those sit under
+`benchmark-results/results/` (one per stack, in scenario order):
 
 ```bash
-C=30,50,70,90,110,130,150,170,190,210,230
-A="random"=collected-logs-random "smart"=collected-logs-smart
-.venv/bin/python3 ipp_benchmarking/tools/plot_latency_vs_concurrency_kind.py $A \
-  --concurrencies $C --bars split -o latency_vs_concurrency_kind.png
-.venv/bin/python3 ipp_benchmarking/tools/plot_routing_vs_concurrency_kind.py $A \
-  --concurrencies $C -o routing_vs_concurrency_kind.png
+R=(collected-logs-<N>/benchmark-results/results/*/)
+.venv/bin/python3 ipp_benchmarking/tools/plot_ttft_per_stage.py \
+  "opt-125m=${R[0]}" "opt-350m=${R[1]}" -o latency_per_stage_kind.png
+
+# routing split (smart arm only -- the baseline has no scorer decisions)
+.venv/bin/python3 ipp_benchmarking/tools/analyze_routing.py \
+  collected-logs-<N>/payload-processor-*.log
 ```
 
 ---
@@ -217,6 +228,7 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
   -f ipp_benchmarking/ipp_configs/adaptive-gemma-qwen-smart-values.yaml \
   --set provider.supportedEvents.requestBody=true --set provider.supportedEvents.requestTrailers=true \
   --set provider.supportedEvents.responseBody=true --set 'payloadProcessor.flags.v=4' \
+  --set payloadProcessor.image.registry=ghcr.io/<you> \
   --set inferenceGateway.name=infra-llmdbench-inference-gateway --set provider.messageTimeout=1200s
 oc rollout restart deploy/payload-processor -n "$NAMESPACE"
 oc rollout status  deploy/payload-processor -n "$NAMESPACE" --timeout=180s
@@ -247,7 +259,7 @@ routing share over time):
 
 ```bash
 .venv/bin/python3 ipp_benchmarking/tools/plot_adaptive_stages.py \
-  ipp_benchmarking/example_outputs/gemma-qwen-adaptive/adaptive -o /tmp/adaptive
+  ipp_benchmarking/example_outputs/gemma-qwen-adaptive/stage-by-stage-final -o /tmp/adaptive
 ```
 
 ### Files
@@ -260,3 +272,90 @@ routing share over time):
 | Workloads | `workload/profiles/inference-perf/adaptive_{shared,gemma,qwen}_summarization.yaml.in` |
 | Run driver / single stage | `ipp_benchmarking/tools/adaptive_toggle_run.sh`, `tools/stage.sh` |
 | Stage extractor, figures | `ipp_benchmarking/tools/ipp_extract_stage.sh`, `tools/plot_adaptive_stages.py` |
+
+---
+
+## 4. OCP dual-pool Qwen3-8B — weighted vs adaptive routing
+
+The **same** model in two InferencePools with deliberately unequal capacity
+(A = 2 pods, B = 3 pods). One harness, one gateway; only the HTTPRoute changes
+per arm, so the arms differ solely in how load is split.
+
+Two pools of one model need distinct `model.name` **aliases** (`-a` / `-b`) —
+every resource name derives from `sha256(namespace/model.name)`, so identical
+names collide. `huggingfaceId` stays the real id (weights load), and
+`--served-model-name` lists all three names so either pool answers to any of
+them. This requires dropping `modelCommand: imageDefault`, which silently
+ignores `additionalFlags`; that also drops the image's `USER`/`LOGNAME`, so the
+scenario sets them via `decode.extraEnvVars` or vLLM crashloops on `getpwuid`.
+`modelPvc` must be RWX — RWO multi-attach-fails with >1 pod per pool.
+
+Three arms over one standup, `poisson_rps_pyramid.yaml` (~75k requests each):
+
+- **`w5050`** — weighted 50/50, capacity-blind.
+- **`w4060`** — weighted 40/60, matching the 2:3 pod ratio.
+- **`smart`** — IPP `ttft-aware-scorer` + `max-score-picker`. Needs
+  `session-affinity` in the profile's `response:` block, or TTFT is never
+  observed and routing is blind.
+
+```bash
+export NAMESPACE=<your-namespace>
+export IPP_PATH=/path/to/llm-d-inference-payload-processor
+
+llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool standup -p "$NAMESPACE"
+
+# VALUES per arm: weighted arms use header plugins only (no model-selector);
+# the smart arm adds the scorer, needs models.json re-injected after upgrade, and
+# needs --set payloadProcessor.image.registry=ghcr.io/<you> (it pins only a tag).
+helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
+  -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/dual-pool-weighted-values.yaml \
+  --set provider.name=istio --set provider.messageTimeout=1200s \
+  --set inferenceGateway.name=infra-llmdbench-inference-gateway
+oc rollout restart deploy/payload-processor -n "$NAMESPACE"
+oc apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-a-base-model.yaml \
+                         -f ipp_benchmarking/ipp_configs/qwen3-8b-b-base-model.yaml
+
+# Verify the split before a real run. Freshly-scaled decode pods need ~2 min of
+# EPP scrape lag before the pool reports endpoints -- until then every request is
+# a 503 and "total served: 0". Re-run until it serves; the ratio is only
+# indicative at n=20 (weighted routing is per-request random, so 1:1 commonly
+# lands anywhere from 30/70 to 70/30).
+NAMESPACE=$NAMESPACE ipp_benchmarking/tools/smoke_route_split.sh 20 1 1
+
+# one arm per invocation; re-run the helm upgrade with the matching values first
+ipp_benchmarking/tools/ab_pool_split_run.sh fixed_5050_poisson w5050 poisson_rps_pyramid.yaml
+ipp_benchmarking/tools/ab_pool_split_run.sh fixed_4060_poisson w4060 poisson_rps_pyramid.yaml
+ipp_benchmarking/tools/ab_pool_split_run.sh smart_poisson      smart poisson_rps_pyramid.yaml
+
+llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool teardown -p "$NAMESPACE"
+helm uninstall payload-processor -n "$NAMESPACE"
+```
+
+**Plot.** Compare on mean/p99, not p50: 50/50 overloads the small pool while the
+big one idles, so its median sits in the fast half and hides the tail.
+
+```bash
+D=ipp_benchmarking/example_outputs/ocp-qwen3-8b-dual-pool
+A=("50/50=$D/fixed_5050_poisson" "40/60=$D/fixed_4060_poisson" "smart=$D/smart_poisson")
+P=.venv/bin/python3
+
+$P ipp_benchmarking/tools/plot_e2e_aggregate.py "${A[@]}" -o $D/e2e_aggregate_3way.png
+$P ipp_benchmarking/tools/plot_throughput.py "${A[@]}" --mode perstage -o $D/throughput_perstage_3way.png
+$P ipp_benchmarking/tools/plot_ttft_per_stage.py "${A[@]}" --metric e2e -o $D/e2e_perstage_3way.png
+```
+
+Result: 40/60 ≈ smart, both ≫ 50/50 (p99 54.7 / 58.2 / 99.5 s, peak throughput
+55.9 / 55.3 / 45.7 req/s). Smart's value is finding the balance without knowing
+the 2:3 ratio in advance.
+
+### Files
+
+| Purpose | Path |
+|---|---|
+| Scenario / spec | `config/scenarios/cicd/ocp-qwen3-8b-dual-pool.yaml` (+ `-run` for the harness, + `config/specification/…`) |
+| IPP values | `ipp_benchmarking/ipp_configs/dual-pool-{weighted,smart}-values.yaml` |
+| Base-model ConfigMaps | `ipp_benchmarking/ipp_configs/qwen3-8b-{a,b}-base-model.yaml` |
+| Workloads | `workload/profiles/inference-perf/poisson_rps_pyramid{,_short}.yaml.in` |
+| Run driver | `ipp_benchmarking/tools/ab_pool_split_run.sh` |
+| Weighted route, split check | `ipp_benchmarking/tools/gen_weighted_route.sh`, `tools/smoke_route_split.sh` |
+| Figures | `ipp_benchmarking/tools/plot_e2e_aggregate.py`, `tools/plot_throughput.py` |

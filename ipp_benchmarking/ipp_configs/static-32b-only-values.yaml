@@ -1,5 +1,5 @@
 # Single-model baseline: ONLY Qwen3-32B registered (listModels) -> every request has one
-# candidate, so there is no routing choice. Install this, then drive half_32b.yaml (32B-pinned,
+# candidate, so there is no routing choice. Install this, then drive half_32b_poisson.yaml (32B-pinned,
 # half conc) as the static 32B leg. No scorer needed with a single candidate.
 provider:
   # Extractor needs the full response lifecycle; responseBody alone never

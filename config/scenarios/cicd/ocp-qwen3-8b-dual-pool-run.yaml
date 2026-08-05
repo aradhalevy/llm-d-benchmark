@@ -7,10 +7,8 @@
 # resources and only launches the harness.
 
 shared:
-  affinity:
-    enabled: true
-    nodeSelector:
-      nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+  # GPU placement comes from accelerator auto-detection. To pin a SKU, set
+  # affinity.enabled: true + nodeSelector: {nvidia.com/gpu.product: <label>}.
   accelerator:
     count: 1
     memory: 80
@@ -82,7 +80,7 @@ shared:
       size: 96Gi
   harness:
     name: inference-perf
-    experimentProfile: sweep_8stage.yaml
+    experimentProfile: poisson_rps_pyramid.yaml
     resources:
       cpu: "8"
       memory: 96Gi

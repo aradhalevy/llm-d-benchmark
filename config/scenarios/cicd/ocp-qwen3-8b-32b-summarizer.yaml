@@ -11,10 +11,8 @@
 # trimmed to the 8B stack so the run phase deploys exactly one harness.
 
 shared:
-  affinity:
-    enabled: true
-    nodeSelector:
-      nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+  # GPU placement comes from accelerator auto-detection. To pin a SKU, set
+  # affinity.enabled: true + nodeSelector: {nvidia.com/gpu.product: <label>}.
   accelerator:
     count: 1
     memory: 80
@@ -76,10 +74,10 @@ shared:
     workloadPvc:
       accessModes:
         - ReadWriteMany
-      size: 96Gi
+      size: 30Gi
   harness:
     name: inference-perf
-    experimentProfile: summarization_concurrency_8b32b.yaml
+    experimentProfile: sweep_8stage_poisson.yaml
     resources:
       cpu: "8"
       memory: 96Gi

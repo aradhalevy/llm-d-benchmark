@@ -15,10 +15,8 @@
 # Cluster: OpenShift + NVIDIA GPU Operator, H100-80GB (1 GPU/pod, 2 pods total). HF_TOKEN in env.
 
 shared:
-  affinity:
-    enabled: true
-    nodeSelector:
-      nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+  # GPU placement comes from accelerator auto-detection. To pin a SKU, set
+  # affinity.enabled: true + nodeSelector: {nvidia.com/gpu.product: <label>}.
   accelerator:
     count: 1
     memory: 80

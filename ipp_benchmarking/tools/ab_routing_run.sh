@@ -1,11 +1,11 @@
 #!/bin/bash
 # Routing A/B: median-TTFT scorer (smart) vs single-model runs. One arm/invocation.
 # Configure the IPP for the arm per the README (helm upgrade -f <values>) first.
-#   ab_routing_run.sh <arm> <ipp_values_file> [profile=half_8b.yaml]
+#   ab_routing_run.sh <arm> <ipp_values_file> [profile=half_8b_poisson.yaml]
 set -u
-ARM="${1:?arm}"; CFG="${2:?ipp values file}"; PROFILE="${3:-half_8b.yaml}"; SPEC="${4:-cicd/ocp-qwen3-8b-32b-summarizer}"
+ARM="${1:?arm}"; CFG="${2:?ipp values file}"; PROFILE="${3:-half_8b_poisson.yaml}"; SPEC="${4:-cicd/ocp-qwen3-8b-32b-summarizer}"
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-NS=llm-d-arad; DAP=access-to-harness-data-workload-pvc
+NS="${NAMESPACE:?set NAMESPACE to your namespace}"; DAP=access-to-harness-data-workload-pvc
 D=ipp_benchmarking/example_outputs/ocp-research-agent-routing
 DEST=$REPO/$D/$ARM
 OCD=$DEST/oc-logs; STOP=/tmp/abr_${ARM}_stop
@@ -29,7 +29,7 @@ oc delete pod -n $NS $DAP --force --grace-period=0 2>/dev/null   # let llmdbench
 # 2. capture the full IPP log (ALL lines incl. ttft-observation / queue-ttft score) streamed live so
 # it survives container-log rotation (kubelet caps ~250Mi; at v=4 under load it rotates in minutes,
 # so --tail at run end loses early stages). The only complete per-request source; its "Model selected"
-# lines drive the routing analysis/plots (analyze_routing.py, plot_routing_vs_concurrency_ocp.py).
+# lines drive the routing analysis/plots (analyze_routing.py).
 ( while [ ! -f "$STOP" ]; do oc logs -f -n $NS "$POD" --since=5s 2>/dev/null >> "$DEST/ipp-full-live.log"; done ) & N3=$!
 echo "fulllog=$N3"
 
@@ -46,7 +46,7 @@ echo "WAITER done"; sleep 15
 touch "$STOP"; sleep 25; kill $N3 2>/dev/null
 
 # 5. stage files + slim
-SWS=$(grep -oE '/tmp/workspace_llmdbench_[^/]+/arad-[0-9-]+' /tmp/abr_${ARM}_summ.log | head -1)
+SWS=$(grep -oE '/tmp/workspace_llmdbench_[^/]+/[[:alnum:]_.-]+-[0-9]{8}-[0-9]+-[0-9]+' /tmp/abr_${ARM}_summ.log | head -1)
 SDIR=$(find "$SWS" -name stage_0_lifecycle_metrics.json 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
 cp "$SDIR"/stage_*_lifecycle_metrics.json "$SDIR"/summary_lifecycle_metrics.json "$DEST/" 2>/dev/null
 # inference-perf load-gen stdout (the "Stage N - run started" lines) -> stage bands for the TTFT plotter
