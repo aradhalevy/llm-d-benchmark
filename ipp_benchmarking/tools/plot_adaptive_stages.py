@@ -69,7 +69,8 @@ def read_stage(path: str) -> dict:
         rid, t = rid_m.group(1), float(ts_m.group(1))
         if '"msg":"ttft-aware score"' in line:
             mo = re.search(r'"model":"([^"]+)"', line)
-            et = re.search(r'"effectiveTTFT":([0-9.eE+-]+)', line)
+            # queue-ttft-scorer logs effectiveTTFT; ttft-aware-scorer logs predictedTTFT
+            et = re.search(r'"(?:effectiveTTFT|predictedTTFT)":([0-9.eE+-]+)', line)
             tr = re.search(r'"trusted":(true|false)', line)
             if mo and et:
                 p = pool_of(mo.group(1))

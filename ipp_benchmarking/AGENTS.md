@@ -25,8 +25,13 @@ logs, EPP scores, decode KV/queue) — one without the other can't answer it.
     to the lowest predicted TTFT.
   - **random** — max-score picker, **no scorer** (`maxscore-baseline-values.yaml`;
     load-blind, spreads traffic across all listed pools regardless of load).
-  - A TTFT scorer needs a ResponseProcessor (`session-affinity`) to observe TTFT
-    at all; without one every candidate scores equal and routing is random.
+  - Whether a TTFT scorer needs a ResponseProcessor to observe TTFT is
+    build-dependent. Builds whose streaming path skips the datalayer
+    ResponseEvent record nothing without one, and every candidate then scores
+    equal (random routing). Newer builds feed the extractor directly — measured
+    2026-08-06 on `llm-d-arad`: no ResponseProcessor configured, yet 3000
+    `ttft-observation` lines and `RecentN=250`. Always check `RecentN` rather
+    than assuming either way.
   - A config-only `helm upgrade` does **not** restart the IPP pod (no checksum
     annotation) — `kubectl rollout restart deploy/payload-processor` between arms.
 - Base-model ConfigMaps consumed by the default plugins **must** carry label
@@ -202,7 +207,7 @@ import gzip,json,collections
 c=collections.Counter()
 for l in gzip.open('<stage>/ipp-raw.log.gz','rt',errors='ignore'):
     if '\"msg\":\"ttft-percentile wrote attribute\"' in l: c[json.loads(l).get('RecentN')]+=1
-print(c)"        # all-zero RecentN => blind; add session-affinity and re-run
+print(c)"        # all-zero RecentN => blind: the build needs a ResponseProcessor, re-run with one
 ```
 
 **Two pools must be stood up sequentially** — they collide on the shared gateway

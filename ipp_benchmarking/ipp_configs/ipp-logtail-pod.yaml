@@ -1,6 +1,23 @@
 # In-cluster IPP log capture: a laptop-side `oc logs -f` drops ~75% of lines under load.
 # Apply with `oc apply -n <namespace> -f`; the container reads its own namespace from the SA.
-# Requires a ServiceAccount `ipp-logtail` with get/list on pods + pods/log, and the workload PVC.
+# Requires the workload PVC; the ServiceAccount + RBAC it needs are created below.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ipp-logtail}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ipp-logtail}
+rules:
+- {apiGroups: [""], resources: ["pods"], verbs: ["get","list","watch"]}
+- {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ipp-logtail}
+subjects: [{kind: ServiceAccount, name: ipp-logtail}]
+roleRef: {kind: Role, name: ipp-logtail, apiGroup: rbac.authorization.k8s.io}
+---
 apiVersion: v1
 kind: Pod
 metadata:

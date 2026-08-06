@@ -7,8 +7,19 @@ This uses `llmdbenchmark` (the repo this lives in). Detailed instructions on how
 
 Run `llmdbenchmark` **from the repo root** — it auto-discovers this bundle's
 scenarios and specs. The workload profiles live in `workload/profiles/` at the
-repo root and resolve by bare name (`-w`). Plotters need matplotlib/numpy, so
-run them with `.venv/bin/python3`.
+repo root and resolve by bare name (`-w`). Plotters need matplotlib, which is not
+an `llmdbenchmark` dependency: `.venv/bin/pip install matplotlib` once, then run
+them with `.venv/bin/python3`.
+
+`IPP_PATH` must point at an IPP checkout that has the scorer plugins the arm's
+values file uses, and whose chart still takes `payloadProcessor.listModels`
+(upstream `main` renamed it, so `models.json` is never rendered and
+`model-config-datasource` fails to start). Each values file pins the image
+`tag` naming the build it needs; a checkout missing that plugin crashloops with
+`plugin type '<name>' is not registered`. PR188 provides the `queue-ttft-scorer`
+builds (`ttft-scorer`, §1 and §2); the `ttft-aware-scorer` /
+`auto-group-model-name-filter` builds used by §3 and §4 (`ttft-aware-p25-expl`)
+come from their own branches.
 
 The run drivers in `tools/` require `NAMESPACE` to be exported and source an
 optional gitignored `.env` from the repo root (put `HF_TOKEN` there). Nothing is
@@ -17,9 +28,31 @@ and the GPU node label is auto-detected.
 
 Troubleshooting, gotchas and findings live in [`AGENTS.md`](./AGENTS.md).
 
+## Known repo fix still needed
+
+**`config/templates/values/defaults.yaml:762` puts the EPP metrics-reader Secret name
+on a key the llm-d-router chart does not read.** The chart takes
+`router.monitoring.prometheus.auth.secretName`
+(`charts/router/templates/_sa-token-secret.yaml`); defaults.yaml sets
+`router.monitoring.secretName`. The per-stack suffixed name is therefore ignored and
+every router falls back to the chart default `inference-gateway-sa-metrics-reader-secret`
+— so in a multi-stack scenario with `prometheus.enabled: true` the first router claims
+that Secret and every later one fails to install:
+
+```
+Secret "inference-gateway-sa-metrics-reader-secret" ... cannot be imported into the
+current release: annotation validation error: key "meta.helm.sh/release-name" must equal ...
+```
+
+Fix is to move that key under `prometheus.auth` in defaults.yaml (and in
+`05_namespace_sa_rbac_secret.yaml.j2:46`, which grants RBAC `resourceNames` from the same
+wrong path). Until then the dual-pool scenario overrides it per stack; single-stack
+scenarios are unaffected.
+
 ## Run data
 
-`example_outputs/` is the directory results land in. There is one directory per arm:
+`example_outputs/` is the directory results land in (gitignored — the run drivers
+create it, so a fresh clone has nothing to plot yet). There is one directory per arm:
 `example_outputs/<experiment>/<arm>/`. Plotters take arms as positional
 `label=dir` plus `-o out.png`, and read:
 
@@ -43,7 +76,7 @@ fast local smoke test of routing. A/B the scorer by re-running with
 
 ```bash
 kind create cluster
-docker pull ghcr.io/llm-d/llm-d-benchmark:v0.6.3 && kind load docker-image ghcr.io/llm-d/llm-d-benchmark:v0.6.3
+docker pull ghcr.io/llm-d/llm-d-benchmark:v0.7.0 && kind load docker-image ghcr.io/llm-d/llm-d-benchmark:v0.7.0
 export IPP_PATH=/path/to/llm-d-inference-payload-processor
 make -C "$IPP_PATH" image-build REGISTRY=ghcr.io/<you> VERSION=ttft-scorer
 kind load docker-image ghcr.io/<you>/llm-d-inference-payload-processor:ttft-scorer
@@ -59,6 +92,10 @@ helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-proces
 kubectl rollout restart deploy/payload-processor -n llmdbench   # config-only upgrades don't restart it
 kubectl apply -n llmdbench -f ipp_benchmarking/ipp_configs/opt-125m-base-model.yaml \
                            -f ipp_benchmarking/ipp_configs/opt-350m-base-model.yaml
+
+# header-match routes (the scenario disables the default PathPrefix route)
+ipp_benchmarking/tools/gen_httproutes.sh llmdbench infra-llmdbench-inference-gateway \
+  facebook/opt-125m facebook/opt-350m | kubectl apply -f -
 
 # give the sims different TTFT/ITL so routing has something to optimize; not in the
 # scenario, so re-apply after every standup
@@ -97,7 +134,7 @@ R=(collected-logs-<N>/benchmark-results/results/*/)
 A deep-research agent hammers the fast 8B and leaves the 32B mostly idle. Smart
 routing spills 8B overflow onto the 32B as load climbs.
 
-Three runs, one arm per `ab_routing_run.sh` invocation — it patches the arm's values into the IPP, restarts it, runs the profile, streams the full IPP log to `ipp-full-live.log` (the container log rotates away under load), then collects.
+Three runs, one arm per `ab_routing_run.sh` invocation — it patches the arm's values into the IPP, restarts it, runs the profile, streams the full IPP log to `ipp-full-live.log` (the container log rotates away under load), then collects. Standup/teardown use `cicd/ocp-qwen3-8b-32b` (both pools); the driver *runs* with `cicd/ocp-qwen3-8b-32b-summarizer`, a single-harness variant, so load has one unconfounded source.
 
 All three profiles are open-loop **Poisson RPS** ladders, 11 stages × 300s (~55
 min per arm), same request shape (~2048 in / ~256 out):
@@ -106,12 +143,13 @@ min per arm), same request shape (~2048 in / ~256 out):
   there is no routing choice. `half_8b_poisson.yaml` runs 2.5→15→2.5 RPS and
   `half_32b_poisson.yaml` 1→6→1 RPS, so per stage `8B + 32B` sums to the smart
   arm's rate.
-- **`smart`** — both models registered, no `model-group-name-filter`, so
+- **`smart`** — both models registered, no `auto-group-model-name-filter`, so
   candidates come from `listModels` and `queue-ttft-scorer` (+
   `ttft-percentile-extractor`, `explorationRate: 0.1`) with `max-score-picker`
   choose per request. `sweep_8stage_poisson.yaml` runs the summed ladder
-  3.5→21→3.5 RPS. Needs an image built with `queue-ttft-scorer`. For the avg-ttft
-  scorer swap in `avgttft-ocp-values.yaml`.
+  3.5→21→3.5 RPS. Needs an image built with `queue-ttft-scorer`. `avgttft-ocp-values.yaml`
+  is the same scorer on the reduced-log `tracechunk` image; to use it drop the
+  `image.tag` `--set` below, which would otherwise override the tag it pins.
 
 All timeouts are lifted to 1200s so nothing is shed — the delta is latency and
 throughput, not failures.
@@ -127,7 +165,7 @@ for d in $(oc get deploy -n "$NAMESPACE" -o name | grep decode); do
   oc patch "$d" -n "$NAMESPACE" -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
   oc set env "$d" -n "$NAMESPACE" -c vllm USER=vllm LOGNAME=vllm
   oc patch "$d" -n "$NAMESPACE" --type=json \
-    -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--max-model-len 8192"}]'
+    -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--max-model-len=8192"}]'
 done
 
 # 2. Install IPP. VALUES selects which model(s) are REGISTERED -- re-run this same
@@ -145,8 +183,8 @@ oc apply -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/qwen3-8b-base-model.yam
 # 3. Header-match routes (the scenario disables the default PathPrefix route).
 ipp_benchmarking/tools/gen_httproutes.sh "$NAMESPACE" | oc apply -f -
 
-# 4. Set NS and GW at the top of tools/ab_routing_run.sh, then run ONE arm at a time,
-#    re-running step 2 with the matching values file before each.
+# 4. Run ONE arm at a time (NAMESPACE is read from the env), re-running step 2 with
+#    the matching values file before each.
 ipp_benchmarking/tools/ab_routing_run.sh static_8b \
     ipp_benchmarking/ipp_configs/static-8b-only-values.yaml half_8b_poisson.yaml
 ipp_benchmarking/tools/ab_routing_run.sh static_32b \
@@ -194,7 +232,7 @@ per-model load is toggled on and off to show the shift **and the recovery**.
 
 All three streams are the same synthetic summarization shape (~2048 in / ~256
 out) at the same rate — only the `model` field differs, so a shared request and a
-pinned request are the same unit of work. `model-group-name-filter` reads it:
+pinned request are the same unit of work. `auto-group-model-name-filter` reads it:
 `"auto"` keeps both pools as candidates, an exact model name pins to one pool.
 
 Poisson RPS per 300s stage, ~60 min total (36,000 requests):
@@ -294,9 +332,10 @@ Three arms over one standup, `poisson_rps_pyramid.yaml` (~75k requests each):
 
 - **`w5050`** — weighted 50/50, capacity-blind.
 - **`w4060`** — weighted 40/60, matching the 2:3 pod ratio.
-- **`smart`** — IPP `ttft-aware-scorer` + `max-score-picker`. Needs
-  `session-affinity` in the profile's `response:` block, or TTFT is never
-  observed and routing is blind.
+- **`smart`** — IPP `ttft-aware-scorer` + `max-score-picker`. No ResponseProcessor
+  is configured, so on builds whose streaming path skips the datalayer
+  ResponseEvent no TTFT is recorded (`RecentN=0`) and routing is blind — check
+  `RecentN` before trusting a smart-arm result.
 
 ```bash
 export NAMESPACE=<your-namespace>
@@ -305,7 +344,8 @@ export IPP_PATH=/path/to/llm-d-inference-payload-processor
 llmdbenchmark --spec cicd/ocp-qwen3-8b-dual-pool standup -p "$NAMESPACE"
 
 # VALUES per arm: weighted arms use header plugins only (no model-selector);
-# the smart arm adds the scorer, needs models.json re-injected after upgrade, and
+# the smart arm adds the scorer, needs models.json re-injected after upgrade (recipe
+# in AGENTS.md, "Upstream main's chart has no listModels"), and
 # needs --set payloadProcessor.image.registry=ghcr.io/<you> (it pins only a tag).
 helm upgrade --install payload-processor "$IPP_PATH/config/charts/payload-processor/" \
   -n "$NAMESPACE" -f ipp_benchmarking/ipp_configs/dual-pool-weighted-values.yaml \
@@ -355,7 +395,7 @@ the 2:3 ratio in advance.
 | Scenario / spec | `config/scenarios/cicd/ocp-qwen3-8b-dual-pool.yaml` (+ `-run` for the harness, + `config/specification/…`) |
 | IPP values | `ipp_benchmarking/ipp_configs/dual-pool-{weighted,smart}-values.yaml` |
 | Base-model ConfigMaps | `ipp_benchmarking/ipp_configs/qwen3-8b-{a,b}-base-model.yaml` |
-| Workloads | `workload/profiles/inference-perf/poisson_rps_pyramid{,_short}.yaml.in` |
+| Workloads | `workload/profiles/inference-perf/poisson_rps_pyramid.yaml.in` |
 | Run driver | `ipp_benchmarking/tools/ab_pool_split_run.sh` |
 | Weighted route, split check | `ipp_benchmarking/tools/gen_weighted_route.sh`, `tools/smoke_route_split.sh` |
 | Figures | `ipp_benchmarking/tools/plot_e2e_aggregate.py`, `tools/plot_throughput.py` |

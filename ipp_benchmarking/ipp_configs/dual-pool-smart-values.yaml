@@ -1,14 +1,17 @@
-# IPP helm values (ttft-scorer image): ttft-AWARE scorer over TWO same-model (Qwen3-8B) pools
+# IPP helm values (ttft-aware-p25-expl image): ttft-AWARE scorer over TWO same-model (Qwen3-8B) pools
 # registered as aliases -a / -b. model-selector's candidates = listModels (request `model`
 # ignored, NO model-name-filter), so every request is scored across BOTH pools; ttft-aware-scorer
 # predicts per-pool effectiveTTFT under load and max-score-picker routes to the lower one ->
 # load-aware routing that should shift traffic to the 3-pod pool as load climbs.
 #
-# ttft-scorer image gotchas (see memory ipp-image-ttft-scorer):
-#  - scorer plugin is `ttft-aware-scorer` (NOT queue/median-ttft).
-#  - session-affinity (a ResponseProcessor) is REQUIRED in the profile response: block: PR #169's
-#    streaming path skips the datalayer ResponseEvent, so without it the extractor never records
-#    TTFT (RecentN=0) and the scorer routes blind. session-affinity forces response buffering.
+# Image gotchas:
+#  - scorer plugin is `ttft-aware-scorer` (NOT queue/median-ttft), so the build must register it.
+#    The `ttft-scorer` tag does NOT -- it carries `queue-ttft-scorer` instead, and this config
+#    crashloops on it with "plugin type 'ttft-aware-scorer' is not registered". Verified by
+#    inspecting both binaries; `ttft-aware-p25-expl` is the build that has it.
+#  - NOTE: no ResponseProcessor is configured. On builds whose streaming path skips the
+#    datalayer ResponseEvent the extractor records no TTFT (RecentN=0) and the scorer routes
+#    blind -- verify RecentN>0 before trusting a smart-arm result.
 #  - helm upgrade WIPES /config/models.json -> re-inject after upgrade + restart the pod:
 #    oc patch cm payload-processor -n <ns> --type=merge \
 #      -p '{"data":{"models.json":"{\"models\":[{\"name\":\"Qwen/Qwen3-8B-a\"},{\"name\":\"Qwen/Qwen3-8B-b\"}]}"}}'
@@ -22,7 +25,7 @@ payloadProcessor:
     # Build the IPP yourself and supply your own registry, e.g.
     #   --set payloadProcessor.image.registry=ghcr.io/<you>
     # The tag below names the IPP build this arm requires.
-    tag: ttft-scorer
+    tag: ttft-aware-p25-expl
     pullPolicy: Always
   listModels:
     - Qwen/Qwen3-8B-a
@@ -40,7 +43,6 @@ payloadProcessor:
         explorationRate: 0.1
       # effectiveTTFT = P10Low + inflight x (P50 - P10Low) / inflightAtP50
     - type: max-score-picker
-    - type: session-affinity   # ResponseProcessor -> forces response buffering so the extractor is fed
     - type: ttft-percentile-extractor
       parameters:
         intervalDuration: 1s
@@ -63,8 +65,6 @@ payloadProcessor:
         - pluginRef: max-score-picker
         - pluginRef: body-field-to-header
         - pluginRef: base-model-to-header
-        response:
-        - pluginRef: session-affinity   # NeedsResponseBuffering -> datalayer ResponseEvent -> TTFT recorded
     datalayer:
       extractors:
       - pluginRef: ttft-percentile-extractor

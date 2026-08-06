@@ -33,9 +33,13 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 NS="${NAMESPACE:?set NAMESPACE to your namespace}"; DAP=access-to-harness-data-workload-pvc
 SPEC=cicd/ocp-gemma-qwen-adaptive-run     # single stack -> one execution per run
 ROOT="$REPO/ipp_benchmarking/example_outputs/gemma-qwen-adaptive/$TAG"
-SHARED=adaptive_shared_summarization.yaml
-GEMMA=adaptive_gemma_summarization.yaml
-QWEN=adaptive_qwen_summarization.yaml
+# Pinned profiles depend on how the IPP build pins. model-group-name-filter builds take an exact
+# model name (the defaults); auto-group-model-name-filter builds take "auto/<group>" and reject
+# exact names with "Filter eliminated all models" -> every pinned request fails. For those:
+#   GEMMA=adaptive_gemma_autogroup_summarization.yaml QWEN=adaptive_qwen_autogroup_summarization.yaml
+SHARED=${SHARED:-adaptive_shared_summarization.yaml}
+GEMMA=${GEMMA:-adaptive_gemma_summarization.yaml}
+QWEN=${QWEN:-adaptive_qwen_summarization.yaml}
 declare -A HNS=([$SHARED]=$NS [$GEMMA]=$NS-2 [$QWEN]=$NS-3)   # one harness namespace per profile
 STAGGER=5                        # s between two same-stage launches (just API-call spacing now)
 
@@ -124,8 +128,13 @@ ctr() {  # ctr <decode-deploy-prefix>
   [ -z "$v" ] && { echo "CTR_ERR no metric from $pod" >&2; return 1; }
   echo "$v"
 }
-G_DEPLOY="${G_DEPLOY:-redhatai-8b040957--dynamic-decode}"
-Q_DEPLOY="${Q_DEPLOY:-qwen-qwe-8c882a7a--a3b-fp8-decode}"
+# Deploy names are {first8}-{sha256(ns/model)[:8]}-{last8}-decode, so they change with the
+# namespace -- derive them (same idlabel as gen_httproutes.sh) instead of pinning a hash.
+idlabel() { local m="${1//\//-}"; m="${m//./-}"
+  local h; h=$(printf '%s/%s' "$NS" "$m" | sha256sum | cut -c1-8)
+  printf '%s-%s-%s' "${m:0:8}" "$h" "${m: -8}" | tr '[:upper:]' '[:lower:]'; }
+G_DEPLOY="${G_DEPLOY:-$(idlabel RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic)-decode}"
+Q_DEPLOY="${Q_DEPLOY:-$(idlabel Qwen/Qwen3.6-35B-A3B-FP8)-decode}"
 echo "stage,gemma,qwen,total,gemma_pct" > "$ROOT/splits.csv"
 
 # Qwen3.6 (hybrid GDN+attention) can wedge SILENTLY under load: engine stops stepping, 100% GPU,
@@ -169,7 +178,9 @@ launch() {  # launch <profile> <label>
 run_stage() {  # run_stage <label> <profile...>  -- launch all, wait for ALL, then return
   local label="$1"; shift
   echo "===== STAGE $label START +$((SECONDS-T0))s -- runs: $* ====="
-  local g0=$(ctr "$G_DEPLOY") q0=$(ctr "$Q_DEPLOY")
+  # split declaration from assignment, else `local` masks ctr's exit status and a broken
+  # exec is recorded as a real zero -- exactly the silent corruption ctr() promises to avoid
+  local g0 q0; g0=$(ctr "$G_DEPLOY") || return 1; q0=$(ctr "$Q_DEPLOY") || return 1
   echo "$label start_ts=$(date +%s) offset=$((SECONDS-T0)) g0=$g0 q0=$q0" >> "$ROOT/stage_marks.log"
   local pids=() first=1
   for prof in "$@"; do
@@ -189,11 +200,19 @@ run_stage() {  # run_stage <label> <profile...>  -- launch all, wait for ALL, th
     fi
     sleep 15
   done
-  local g1=$(ctr "$G_DEPLOY") q1=$(ctr "$Q_DEPLOY")
+  local g1 q1; g1=$(ctr "$G_DEPLOY") || return 1; q1=$(ctr "$Q_DEPLOY") || return 1
   echo "$label end_ts=$(date +%s) offset=$((SECONDS-T0)) g1=$g1 q1=$q1" >> "$ROOT/stage_marks.log"
   awk -v l="$label" -v g=$((${g1%.*}-${g0%.*})) -v q=$((${q1%.*}-${q0%.*})) \
     'BEGIN{t=g+q; printf "%s,%d,%d,%d,%s\n", l, g, q, t, (t?sprintf("%.1f",100*g/t):"NA")}' \
     | tee -a "$ROOT/splits.csv"
+  # A stage that ran load but completed nothing means every request failed (commonly a pinned
+  # profile whose model name the filter rejects). The harness still reports "Run complete", so
+  # without this the whole timeline runs to the end and only the flat splits.csv reveals it.
+  if [ $(( ${g1%.*} - ${g0%.*} + ${q1%.*} - ${q0%.*} )) -eq 0 ]; then
+    echo "*** $label completed ZERO requests -- check the profiles' model names against the"
+    echo "*** IPP filter ('Filter eliminated all models' in the IPP log) before rerunning."
+    return 1
+  fi
   echo "===== STAGE $label DONE +$((SECONDS-T0))s ====="
 }
 

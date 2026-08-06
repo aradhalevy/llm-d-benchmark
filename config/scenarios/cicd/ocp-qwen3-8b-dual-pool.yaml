@@ -50,12 +50,12 @@ shared:
       limits:   { cpu: "2",    memory: 2Gi }
       requests: { cpu: "500m", memory: 512Mi }
 
-  inferenceExtension:
-    experimentalHttpRoute:
-      requestTimeout: "120s"
-    resources:
-      requests: { cpu: "200m", memory: 512Mi }
-      limits:   { cpu: "1",    memory: 1Gi }
+  # llm-d-router chart keys (chart default is cpu 8 / memory 8Gi)
+  router:
+    epp:
+      resources:
+        requests: { cpu: "200m", memory: 512Mi }
+        limits:   { cpu: "1",    memory: 1Gi }
     monitoring:
       prometheus:
         enabled: true
@@ -95,9 +95,9 @@ shared:
     # We drop modelCommand:imageDefault (to honor additionalFlags), which also drops
     # the image's USER=vllm/LOGNAME=vllm. Without them vLLM's torch import calls
     # getpass.getuser() -> getpwuid(<arbitrary OCP UID>) -> KeyError crashloop. Set them.
+    # LOGNAME only: the env macro (_macros.j2) already emits USER, and a second one
+    # is a duplicate env key that Helm 4 server-side apply rejects.
     extraEnvVars:
-      - name: USER
-        value: vllm
       - name: LOGNAME
         value: vllm
 
@@ -140,6 +140,17 @@ scenario:
   # --------------------------------------------------------------------------
   - name: "qwen3-8b-a"
 
+    # Per-pool metrics-reader Secret. The chart reads
+    # router.monitoring.prometheus.auth.secretName; the repo's defaults.yaml sets
+    # router.monitoring.secretName, which the chart ignores -> every router in the
+    # namespace creates the SAME default-named Secret and the 2nd install fails on
+    # Helm ownership. Overriding it here keeps the fix scenario-local.
+    router:
+      monitoring:
+        prometheus:
+          auth:
+            secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b-a
+
     model:
       name: Qwen/Qwen3-8B-a         # alias -> distinct pool identity
       shortName: qwen-qwen3-8b-a
@@ -149,9 +160,6 @@ scenario:
       maxModelLen: 8192
       gpuMemoryUtilization: 0.90
 
-    inferenceExtension:
-      experimentalHttpRoute:
-        enabled: false              # routes applied manually per arm
 
     decode:
       replicas: 2
@@ -181,6 +189,17 @@ scenario:
   # --------------------------------------------------------------------------
   - name: "qwen3-8b-b"
 
+    # Per-pool metrics-reader Secret. The chart reads
+    # router.monitoring.prometheus.auth.secretName; the repo's defaults.yaml sets
+    # router.monitoring.secretName, which the chart ignores -> every router in the
+    # namespace creates the SAME default-named Secret and the 2nd install fails on
+    # Helm ownership. Overriding it here keeps the fix scenario-local.
+    router:
+      monitoring:
+        prometheus:
+          auth:
+            secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b-b
+
     model:
       name: Qwen/Qwen3-8B-b
       shortName: qwen-qwen3-8b-b
@@ -190,9 +209,6 @@ scenario:
       maxModelLen: 8192
       gpuMemoryUtilization: 0.90
 
-    inferenceExtension:
-      experimentalHttpRoute:
-        enabled: false
 
     decode:
       replicas: 3

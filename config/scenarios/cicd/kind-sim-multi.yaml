@@ -3,9 +3,9 @@
 # Two InferencePools (facebook/opt-125m, facebook/opt-350m) behind a shared
 # Istio Gateway on a Kind cluster. No GPUs required.
 #
-# Each InferencePool self-registers its HTTPRoute via experimentalHttpRoute,
-# matching on the X-Gateway-Base-Model-Name header that IPP injects. No
-# separate shared HTTPRoute is needed.
+# HTTPRoutes are created out-of-band by ipp_benchmarking/tools/gen_httproutes.sh,
+# matching on the X-Gateway-Base-Model-Name header that IPP injects. (The old
+# experimentalHttpRoute self-registration is gone with the llm-d-router chart.)
 #
 # Topology:
 #   Gateway (infra-llmdbench, shared)
@@ -44,7 +44,7 @@ shared:
   standalone:
     enabled: false
 
-  # Each InferencePool creates its own HTTPRoute via experimentalHttpRoute;
+  # Header-match routes are applied out-of-band by gen_httproutes.sh;
   # suppress the benchmark's per-stack HTTPRoute step entirely.
   httpRoute:
     enabled: false
@@ -60,17 +60,17 @@ shared:
         cpu: "250m"
         memory: 256Mi
 
-  # Minimal EPP resources for Kind
-  inferenceExtension:
-    experimentalHttpRoute:
-      requestTimeout: "30s"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: 256Mi
-      limits:
-        cpu: "1"
-        memory: 1Gi
+  # Minimal EPP resources for Kind (llm-d-router chart keys; the chart default
+  # is cpu 8 / memory 8Gi, which cannot schedule on a stock kind node)
+  router:
+    epp:
+      resources:
+        requests:
+          cpu: "100m"
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
     monitoring:
       prometheus:
         enabled: false
@@ -179,12 +179,6 @@ scenario:
       maxModelLen: 1024
       gpuMemoryUtilization: 0
 
-    inferenceExtension:
-      experimentalHttpRoute:
-        enabled: true
-        inferenceGatewayName: infra-llmdbench-inference-gateway
-        baseModel: "facebook/opt-125m"
-
   # --------------------------------------------------------------------------
   # facebook/opt-350m
   # --------------------------------------------------------------------------
@@ -197,12 +191,6 @@ scenario:
       huggingfaceId: facebook/opt-350m
       maxModelLen: 1024
       gpuMemoryUtilization: 0
-
-    inferenceExtension:
-      experimentalHttpRoute:
-        enabled: true
-        inferenceGatewayName: infra-llmdbench-inference-gateway
-        baseModel: "facebook/opt-350m"
 
     decode:
       resources:

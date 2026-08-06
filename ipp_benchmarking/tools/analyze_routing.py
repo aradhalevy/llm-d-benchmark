@@ -14,7 +14,9 @@ for line in open(log, errors="ignore"):
     if '"msg":"Model selected"' not in line:
         continue
     try:
-        d = json.loads(line)
+        # collect_logs.sh uses `kubectl logs --timestamps`, which prefixes each
+        # line with an RFC3339 stamp; ab_routing_run.sh's capture does not.
+        d = json.loads(line[line.find("{"):])
     except ValueError:
         continue
     rid, m = d.get("x-request-id"), d.get("model")

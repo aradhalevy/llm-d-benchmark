@@ -26,8 +26,13 @@ NS=${NS:?set NS to your namespace}
 SPEC=${SPEC:-cicd/ocp-gemma-qwen-adaptive-run}
 OUT="$REPO/ipp_benchmarking/example_outputs/gemma-qwen-adaptive/${TAG:-stage-300s-summarization}"
 mkdir -p "$OUT"
-G_DEPLOY=${G_DEPLOY:-redhatai-8b040957--dynamic-decode}   # deploy names are standup-generated; override per cluster
-Q_DEPLOY=${Q_DEPLOY:-qwen-qwe-8c882a7a--a3b-fp8-decode}
+# deploy names are {first8}-{sha256(ns/model)[:8]}-{last8}-decode, so they change with the
+# namespace -- derive them (same idlabel as gen_httproutes.sh) instead of pinning a hash
+idlabel() { local m="${1//\//-}"; m="${m//./-}"
+  local h; h=$(printf '%s/%s' "$NS" "$m" | sha256sum | cut -c1-8)
+  printf '%s-%s-%s' "${m:0:8}" "$h" "${m: -8}" | tr '[:upper:]' '[:lower:]'; }
+G_DEPLOY=${G_DEPLOY:-$(idlabel RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic)-decode}
+Q_DEPLOY=${Q_DEPLOY:-$(idlabel Qwen/Qwen3.6-35B-A3B-FP8)-decode}
 ATTEMPTS=${ATTEMPTS:-3}
 DAP_POD=access-to-harness-data-workload-pvc   # data-access pod that mounts the PVC with the logtail capture
 EXTRACTOR=$REPO/ipp_benchmarking/tools/ipp_extract_stage.sh
@@ -40,6 +45,7 @@ hns() { case "$1" in
   adaptive_gemma_summarization.yaml)  echo "$NS-2" ;;
   adaptive_gemma_autogroup_summarization.yaml) echo "$NS-2" ;;
   adaptive_qwen_summarization.yaml)   echo "$NS-3" ;;
+  adaptive_qwen_autogroup_summarization.yaml) echo "$NS-3" ;;
 esac; }
 pod_of()  { oc get pod -n $NS --no-headers 2>/dev/null | grep "^${1}-" | awk '$2~/^[1-9]/{print $1;exit}'; }
 serving() { oc exec -n $NS "$1" -c vllm -- curl -s -o /dev/null -w '%{http_code}' localhost:8000/v1/models 2>/dev/null; }

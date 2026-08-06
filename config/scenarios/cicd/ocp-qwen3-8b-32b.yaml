@@ -50,12 +50,12 @@ shared:
       limits:   { cpu: "2",    memory: 2Gi }
       requests: { cpu: "500m", memory: 512Mi }
 
-  inferenceExtension:
-    experimentalHttpRoute:
-      requestTimeout: "120s"
-    resources:
-      requests: { cpu: "200m", memory: 512Mi }
-      limits:   { cpu: "1",    memory: 1Gi }
+  # llm-d-router chart keys (chart default is cpu 8 / memory 8Gi)
+  router:
+    epp:
+      resources:
+        requests: { cpu: "200m", memory: 512Mi }
+        limits:   { cpu: "1",    memory: 1Gi }
     monitoring:
       prometheus:
         enabled: true
@@ -143,11 +143,6 @@ scenario:
       maxModelLen: 8192
       gpuMemoryUtilization: 0.90
 
-    inferenceExtension:
-      experimentalHttpRoute:
-        enabled: true
-        inferenceGatewayName: infra-llmdbench-inference-gateway
-        baseModel: "Qwen/Qwen3-8B"
 
     decode:
       replicas: 1
@@ -177,11 +172,6 @@ scenario:
       maxModelLen: 8192
       gpuMemoryUtilization: 0.90
 
-    inferenceExtension:
-      experimentalHttpRoute:
-        enabled: true
-        inferenceGatewayName: infra-llmdbench-inference-gateway
-        baseModel: "Qwen/Qwen3-32B"
 
     decode:
       replicas: 2

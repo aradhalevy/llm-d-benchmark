@@ -1,13 +1,13 @@
 # IPP helm values (image ttft-aware-p25-expl) for the Gemma/Qwen adaptive-routing experiment.
-# BOTH real models registered + model-group-name-filter, so the workload's `model` field selects:
+# BOTH real models registered + auto-group-model-name-filter, so the workload's `model` field selects:
 #   "auto" (or empty) -> ALL candidates kept -> ttft-aware-scorer routes to the lower predicted
 #                        TTFT (the SHARED adaptive probe)
 #   exact "<gemma>" / "<qwen>" -> PINNED to that one pool (direct-to-pool / toggled load)
-# (model-name-filter is exact-match only and 429s "auto"; model-group-name-filter does both.)
+# (model-name-filter is exact-match only and 429s "auto"; auto-group-model-name-filter does both.)
 #
 # If routing is blind (IPP log shows RecentN=0 / no recorded TTFT on this image's streaming
 # path), a ResponseProcessor is needed to record TTFT -- use
-# adaptive-gemma-qwen-ttft-aware-fix-values.yaml, which adds session-affinity.
+# adaptive-gemma-qwen-ttft-aware-fix-values.yaml.
 provider:
   supportedEvents:
     requestTrailers: true
@@ -36,7 +36,14 @@ payloadProcessor:
         headerName: X-Gateway-Model-Name
     - type: base-model-to-header
     - type: model-selector
-    - type: model-group-name-filter
+    # groups are this plugin's parameters: "auto" -> all candidates, "auto/<group>" -> that
+    # group only. An unlisted or misspelled group yields no candidates -> 429.
+    - type: auto-group-model-name-filter
+      parameters:
+        gemma:
+        - RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
+        qwen:
+        - Qwen/Qwen3.6-35B-A3B-FP8
     - type: ttft-aware-scorer
       parameters:
         explorationRate: 0.1
@@ -59,7 +66,7 @@ payloadProcessor:
       plugins:
         request:
         - pluginRef: model-selector
-        - pluginRef: model-group-name-filter
+        - pluginRef: auto-group-model-name-filter
         - pluginRef: ttft-aware-scorer
           weight: 1.0
         - pluginRef: max-score-picker

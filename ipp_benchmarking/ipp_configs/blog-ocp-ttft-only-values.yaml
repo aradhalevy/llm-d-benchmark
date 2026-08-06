@@ -1,4 +1,4 @@
-# IPP helm values: avg-ttft scorer ONLY (no inflight blend) — for measuring
+# IPP helm values: queue-ttft scorer ONLY (no inflight blend) — for measuring
 # the pure latency-scorer behavior on ocp-qwen-gemma-multi. See
 # blog-ocp-qwen-gemma-values.yaml for the blended variant and README §C for
 # the kind findings on the differences (EMA lag, stampedes, staleness).
@@ -15,9 +15,9 @@ payloadProcessor:
     - type: base-model-to-header
     - type: model-selector
     - type: model-name-filter
-    - type: avg-ttft-scorer
+    - type: queue-ttft-scorer
     - type: max-score-picker
-    - type: request-metadata-extractor
+    - type: ttft-percentile-extractor
     - type: model-config-datasource
       parameters:
         modelsPath: /config/models.json
@@ -27,13 +27,13 @@ payloadProcessor:
         request:
         - pluginRef: model-selector
         - pluginRef: model-name-filter
-        - pluginRef: avg-ttft-scorer
+        - pluginRef: queue-ttft-scorer
           weight: 1.0
         - pluginRef: max-score-picker
         - pluginRef: body-field-to-header
         - pluginRef: base-model-to-header
     datalayer:
       extractors:
-      - pluginRef: request-metadata-extractor
+      - pluginRef: ttft-percentile-extractor
       datasources:
       - pluginRef: model-config-datasource

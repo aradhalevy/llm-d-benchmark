@@ -1,7 +1,7 @@
-# IPP helm values: avg-ttft scorer (arm B of the A/B/C comparison).
-# avg-ttft-scorer (EMA of observed TTFT per model) + max-score-picker, NO filter,
+# IPP helm values: queue-ttft scorer (arm B of the A/B/C comparison).
+# queue-ttft-scorer (predicted effectiveTTFT per model) + max-score-picker, NO filter,
 # listModels = BOTH (model-selector takes candidates from listModels). Reads the
-# request-metadata datalayer. Image :tracechunk = avg-ttft build with response-chunk
+# ttft-percentile datalayer. Image :tracechunk = the build with response-chunk
 # logging at TRACE (avoids the PVC log flood at --v=4).
 provider:
   name: istio
@@ -12,10 +12,10 @@ payloadProcessor:
     # Build the IPP yourself and supply your own registry, e.g.
     #   --set payloadProcessor.image.registry=ghcr.io/<you>
     # The tag below names the IPP build this arm requires.
-    tag: tracechunk           # avg-ttft build, reduced logs
+    tag: tracechunk           # reduced logs
     pullPolicy: Always
   flags:
-    v: 4                          # log per-model avg-ttft score
+    v: 4                          # log per-model queue-ttft score
   listModels:
     - Qwen/Qwen3-8B
     - Qwen/Qwen3-32B
@@ -27,9 +27,9 @@ payloadProcessor:
         headerName: X-Gateway-Model-Name
     - type: base-model-to-header
     - type: model-selector        # no model-name-filter; model-selector parses the array
-    - type: avg-ttft-scorer
+    - type: queue-ttft-scorer
     - type: max-score-picker
-    - type: request-metadata-extractor
+    - type: ttft-percentile-extractor
     - type: model-config-datasource
       parameters:
         modelsPath: /config/models.json
@@ -38,13 +38,13 @@ payloadProcessor:
       plugins:
         request:
         - pluginRef: model-selector
-        - pluginRef: avg-ttft-scorer
+        - pluginRef: queue-ttft-scorer
           weight: 1.0
         - pluginRef: max-score-picker
         - pluginRef: body-field-to-header
         - pluginRef: base-model-to-header
     datalayer:
       extractors:
-      - pluginRef: request-metadata-extractor
+      - pluginRef: ttft-percentile-extractor
       datasources:
       - pluginRef: model-config-datasource

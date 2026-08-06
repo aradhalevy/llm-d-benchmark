@@ -40,7 +40,14 @@ payloadProcessor:
         headerName: X-Gateway-Model-Name
     - type: base-model-to-header
     - type: model-selector
-    - type: model-group-name-filter
+    # groups are this plugin's parameters: "auto" -> all candidates, "auto/<group>" -> that
+    # group only. An unlisted or misspelled group yields no candidates -> 429.
+    - type: auto-group-model-name-filter
+      parameters:
+        gemma:
+        - RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
+        qwen:
+        - Qwen/Qwen3.6-35B-A3B-FP8
     - type: max-score-picker
     - type: ttft-percentile-extractor
       parameters:
@@ -59,7 +66,7 @@ payloadProcessor:
       plugins:
         request:
         - pluginRef: model-selector
-        - pluginRef: model-group-name-filter
+        - pluginRef: auto-group-model-name-filter
         - pluginRef: max-score-picker
         - pluginRef: body-field-to-header
         - pluginRef: base-model-to-header

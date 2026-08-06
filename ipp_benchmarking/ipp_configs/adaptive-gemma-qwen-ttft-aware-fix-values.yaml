@@ -43,10 +43,9 @@ payloadProcessor:
         explorationRate: 0.1
         anchorGapScale: 2.0
     - type: max-score-picker
-    # ResponseProcessor -> NeedsResponseBuffering=true -> the extractor is fed. Without it this
-    # image records no TTFT at all (RecentN=0), the scorer returns 1 for every model and
-    # max-score-picker shuffles equal scores -> uniform random. Measured, see s0/s1 first run.
-    - type: session-affinity
+    # No ResponseProcessor: on builds whose streaming path skips the datalayer ResponseEvent the
+    # extractor records no TTFT (RecentN=0), the scorer returns 1 for every model and
+    # max-score-picker shuffles equal scores -> uniform random. Check RecentN before trusting a run.
     - type: ttft-percentile-extractor
       parameters:
         intervalDuration: 1s
@@ -70,8 +69,6 @@ payloadProcessor:
         - pluginRef: max-score-picker
         - pluginRef: body-field-to-header
         - pluginRef: base-model-to-header
-        response:
-        - pluginRef: session-affinity
     datalayer:
       extractors:
       - pluginRef: ttft-percentile-extractor
