@@ -21,7 +21,9 @@ Two leaves with asymmetric capacity, same model, sim backends.
 
 ```bash
 kind create cluster --name mc
-export KUBECONFIG=$(kind get kubeconfig --name mc > /tmp/mc.kc; echo /tmp/mc.kc)
+# A dedicated kubeconfig: `kind create cluster` switches the current context of
+# your shared one, which is rude if something else is using it.
+export KUBECONFIG=$(mktemp) && kind get kubeconfig --name mc > "$KUBECONFIG"
 
 # Side-load: the benchmark image is large and the default 6m wait times out on a cold pull.
 for i in ghcr.io/llm-d/llm-d-benchmark:v0.7.0 \
@@ -30,7 +32,7 @@ for i in ghcr.io/llm-d/llm-d-benchmark:v0.7.0 \
   docker pull "$i" && kind load docker-image --name mc "$i"
 done
 
-./install.sh && source .venv/bin/activate
+./install.sh && source .venv/bin/activate   # needs sudo: it installs helm/helmfile/yq
 llmdbenchmark --spec cicd/kind-sim-mc-leaf standup -p mc-a --set decode.replicas=1
 llmdbenchmark --spec cicd/kind-sim-mc-leaf standup -p mc-b --set decode.replicas=3
 
@@ -59,7 +61,12 @@ done
 | baseline (`random-picker`) | 99 (49%) | 101 (50%) | 113s |
 
 Scored routing tracks the 1:3 capacity ratio and finishes the same work 34%
-faster; the baseline keeps overloading the single-pod cluster.
+faster; the baseline keeps overloading the single-pod cluster. A repeat of the
+smart arm gave 57/143 (28%/71%), so run-to-run spread is a few points.
+
+Namespaces, the Kind cluster name, and the router release name are all just
+defaults — override with `ROUTER_NS`, `RELEASE`, `CHART_VERSION`, `MODEL`,
+`MAX_TOKENS`, `CONCURRENCY`, `ARM`. Nothing is pinned to a machine or a user.
 
 ## Gotchas
 
