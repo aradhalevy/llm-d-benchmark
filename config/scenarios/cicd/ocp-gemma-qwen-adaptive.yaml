@@ -101,6 +101,14 @@ shared:
 scenario:
   # Pool A -- Gemma-4 26B-A4B fp8, 1 pod / 1 GPU
   - name: "gemma4-26b-fp8"
+    # Per-stack metrics-reader Secret. Set on BOTH keys: the router chart reads
+    # prometheus.auth.secretName, the RBAC template reads monitoring.secretName.
+    router:
+      monitoring:
+        secretName: inference-gateway-sa-metrics-reader-secret-gemma4-26b-fp8
+        prometheus:
+          auth:
+            secretName: inference-gateway-sa-metrics-reader-secret-gemma4-26b-fp8
     model:
       name: RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
       shortName: gemma4-26b-fp8
@@ -135,6 +143,12 @@ scenario:
   # USER/LOGNAME under shared.decode already covers the getpwuid crashloop that imageDefault was
   # avoiding.
   - name: "qwen36-35b-fp8"
+    router:
+      monitoring:
+        secretName: inference-gateway-sa-metrics-reader-secret-qwen36-35b-fp8
+        prometheus:
+          auth:
+            secretName: inference-gateway-sa-metrics-reader-secret-qwen36-35b-fp8
     model:
       name: Qwen/Qwen3.6-35B-A3B-FP8
       shortName: qwen36-35b-fp8

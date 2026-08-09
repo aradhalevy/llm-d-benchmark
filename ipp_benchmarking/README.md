@@ -28,26 +28,25 @@ and the GPU node label is auto-detected.
 
 Troubleshooting, gotchas and findings live in [`AGENTS.md`](./AGENTS.md).
 
-## Known repo fix still needed
+## Why multi-stack scenarios set `secretName` themselves
 
-**`config/templates/values/defaults.yaml:762` puts the EPP metrics-reader Secret name
-on a key the llm-d-router chart does not read.** The chart takes
+The llm-d-router chart reads the EPP metrics-reader Secret name from
 `router.monitoring.prometheus.auth.secretName`
-(`charts/router/templates/_sa-token-secret.yaml`); defaults.yaml sets
-`router.monitoring.secretName`. The per-stack suffixed name is therefore ignored and
-every router falls back to the chart default `inference-gateway-sa-metrics-reader-secret`
-— so in a multi-stack scenario with `prometheus.enabled: true` the first router claims
-that Secret and every later one fails to install:
+(`charts/router/templates/_sa-token-secret.yaml`), but the repo's per-stack auto-suffix
+(`render_plans.py` `_STACK_SCOPED_DEFAULTS`) rewrites `router.monitoring.secretName` —
+a key the chart never reads. Every router in a namespace therefore falls back to the
+chart default, and with one router Helm release per stack the second install fails:
 
 ```
 Secret "inference-gateway-sa-metrics-reader-secret" ... cannot be imported into the
 current release: annotation validation error: key "meta.helm.sh/release-name" must equal ...
 ```
 
-Fix is to move that key under `prometheus.auth` in defaults.yaml (and in
-`05_namespace_sa_rbac_secret.yaml.j2:46`, which grants RBAC `resourceNames` from the same
-wrong path). Until then the dual-pool scenario overrides it per stack; single-stack
-scenarios are unaffected.
+So every multi-stack scenario here sets the name per stack on **both** keys —
+`prometheus.auth.secretName` for the chart, and `monitoring.secretName` for
+`05_namespace_sa_rbac_secret.yaml.j2`, whose RBAC `resourceNames` reads the second one and
+would otherwise scope `collect_metrics.sh` to a Secret that does not exist. Single-stack
+scenarios, and Kind (`prometheus.enabled: false`), are unaffected.
 
 ## Run data
 

@@ -140,13 +140,13 @@ scenario:
   # --------------------------------------------------------------------------
   - name: "qwen3-8b-a"
 
-    # Per-pool metrics-reader Secret. The chart reads
-    # router.monitoring.prometheus.auth.secretName; the repo's defaults.yaml sets
-    # router.monitoring.secretName, which the chart ignores -> every router in the
-    # namespace creates the SAME default-named Secret and the 2nd install fails on
-    # Helm ownership. Overriding it here keeps the fix scenario-local.
+    # Per-pool metrics-reader Secret. Set on BOTH keys: the router chart reads
+    # prometheus.auth.secretName, the RBAC template reads monitoring.secretName.
+    # Without this, every router in the namespace claims the same default-named
+    # Secret and the 2nd install fails on Helm ownership.
     router:
       monitoring:
+        secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b-a
         prometheus:
           auth:
             secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b-a
@@ -196,6 +196,7 @@ scenario:
     # Helm ownership. Overriding it here keeps the fix scenario-local.
     router:
       monitoring:
+        secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b-b
         prometheus:
           auth:
             secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b-b

@@ -134,6 +134,15 @@ scenario:
   # --------------------------------------------------------------------------
   - name: "qwen3-8b"
 
+    # Per-stack metrics-reader Secret. Set on BOTH keys: the router chart reads
+    # prometheus.auth.secretName, the RBAC template reads monitoring.secretName.
+    router:
+      monitoring:
+        secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b
+        prometheus:
+          auth:
+            secretName: inference-gateway-sa-metrics-reader-secret-qwen3-8b
+
     model:
       name: Qwen/Qwen3-8B
       shortName: qwen-qwen3-8b
@@ -162,6 +171,13 @@ scenario:
   # Qwen3-32B  (big planner/synthesis model -- idle most of the task)
   # --------------------------------------------------------------------------
   - name: "qwen3-32b"
+
+    router:
+      monitoring:
+        secretName: inference-gateway-sa-metrics-reader-secret-qwen3-32b
+        prometheus:
+          auth:
+            secretName: inference-gateway-sa-metrics-reader-secret-qwen3-32b
 
     model:
       name: Qwen/Qwen3-32B
