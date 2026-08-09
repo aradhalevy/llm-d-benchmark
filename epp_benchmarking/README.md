@@ -17,17 +17,27 @@ load ──> router Envoy :8081 ──> router EPP (multicluster plugins)
 
 Troubleshooting and Gotchas are in [`CLAUDE.md`](./CLAUDE.md).
 
-**Prerequisite:** `llmdbenchmark` installed and on your `PATH` — see
-[Getting Started → Install](../README.md#install) in the repo README. Every
-command below runs from the repo root against your default kubeconfig.
+**Prerequisites:** `llmdbenchmark` installed and on your `PATH` — see
+[Getting Started → Install](../README.md#install) in the repo README — plus
+`kind`, `docker`, `helm`, and `envsubst` (from GNU gettext; not installed by
+default on macOS). Every command below runs from the repo root against your
+default kubeconfig.
 
 ## Kind (no GPU)
 
-Two leaves with asymmetric capacity, same model, sim backends. Every name below
-(`mc-a`, `mc-b`, `mc-router`) is just a literal — change them freely.
+Two leaves with asymmetric capacity, same model, sim backends. `mc-a`, `mc-b`
+and `mc-router` are just literals — rename them as long as you do so
+consistently, remembering that the Helm release name determines the
+`mc-router-epp` Deployment, Service and endpoint URL used later. The one name
+that is *not* free is the `mc-clusters` ConfigMap: `router/values.yaml` mounts
+it by name, so change it in both places or not at all.
 
 ### 1. Create the cluster and load images
 
+Side-loading keeps standup from timing out on a cold image pull. The tags must
+match what your `llmdbenchmark` version actually deploys — if standup still
+stalls pulling, check `images.benchmark` in `config/templates/values/defaults.yaml`
+and side-load that tag instead.
 
 ```bash
 kind create cluster
@@ -77,9 +87,19 @@ export MC_A_GW_IP=$(gw_ip "$MC_A_NS") MC_A_GW_PORT=$(gw_port "$MC_A_NS") MC_A_EP
 export MC_B_GW_IP=$(gw_ip "$MC_B_NS") MC_B_GW_PORT=$(gw_port "$MC_B_NS") MC_B_EPP_IP=$(epp_ip "$MC_B_NS")
 
 kubectl create ns mc-router
-envsubst < epp_benchmarking/router/clusters.yaml \
-  | kubectl -n mc-router create configmap mc-clusters --from-file=clusters.yaml=/dev/stdin \
-      --dry-run=client -o yaml | kubectl apply -f -
+
+clusters=$(envsubst < epp_benchmarking/router/clusters.yaml)
+printf '%s\n' "$clusters"
+
+# Any lookup that missed renders as an empty value, and file discovery skips
+# that endpoint silently -- leaving a router that scores one cluster. Refuse to
+# apply instead.
+if printf '%s' "$clusters" | grep -qE '(address|metricsAddress): *$|port: ""'; then
+  echo 'ERROR: empty value above -- are both leaves up in the namespaces you set?' >&2
+else
+  printf '%s' "$clusters" | kubectl -n mc-router create configmap mc-clusters \
+    --from-file=clusters.yaml=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+fi
 ```
 
 ### 5. Install the router
