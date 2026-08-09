@@ -15,36 +15,43 @@ load ──> router Envoy :8081 ──> router EPP (multicluster plugins)
                                   └─> leaf gateway :80 ──> leaf EPP ──> vLLM
 ```
 
+Troubleshooting and Gotchas are in [`CLAUDE.md`](./CLAUDE.md).
+
+**Prerequisite:** `llmdbenchmark` installed and on your `PATH` — see
+[Getting Started → Install](../README.md#install) in the repo README. Every
+command below runs from the repo root against your default kubeconfig.
+
 ## Kind (no GPU)
 
-Two leaves with asymmetric capacity, same model, sim backends.
+Two leaves with asymmetric capacity, same model, sim backends. Every name below
+(`mc-a`, `mc-b`, `mc-router`) is just a literal — change them freely.
+
+### 1. Create the cluster and load images
+
 
 ```bash
-kind create cluster --name mc
-# A dedicated kubeconfig: `kind create cluster` switches the current context of
-# your shared one, which is rude if something else is using it.
-export KUBECONFIG=$(mktemp) && kind get kubeconfig --name mc > "$KUBECONFIG"
+kind create cluster
 
-# Side-load: the benchmark image is large and the default 6m wait times out on a cold pull.
 for i in ghcr.io/llm-d/llm-d-benchmark:v0.7.0 \
          ghcr.io/llm-d/llm-d-inference-sim:v0.8.2 \
          ghcr.io/llm-d/llm-d-router-endpoint-picker:main; do
-  docker pull "$i" && kind load docker-image --name mc "$i"
+  docker pull "$i" && kind load docker-image "$i"
 done
-
-./install.sh && source .venv/bin/activate   # needs sudo: it installs helm/helmfile/yq
-llmdbenchmark --spec cicd/kind-sim-mc-leaf standup -p mc-a --set decode.replicas=1
-llmdbenchmark --spec cicd/kind-sim-mc-leaf standup -p mc-b --set decode.replicas=3
-
-./epp_benchmarking/tools/deploy_router.sh mc-a mc-b          # smart arm
-CONCURRENCY=16 ./epp_benchmarking/tools/route_split.sh 200 mc-a mc-b
-
-ARM=mc-random.yaml ./epp_benchmarking/tools/deploy_router.sh mc-a mc-b   # baseline
-CONCURRENCY=16 ./epp_benchmarking/tools/route_split.sh 200 mc-a mc-b
 ```
 
-Give the sims latency and a low concurrency cap first, or nothing queues and
-both arms look identical (see "Load must be concurrent" below):
+### 2. Stand up an llm-d stack in each namespace
+
+After the images finished loading, we stand up one llm-d stack per namespace, asymmetric capacity so the router has something to decide.
+
+```bash
+llmdbenchmark --spec cicd/kind-sim-mc-leaf standup -p mc-a --set decode.replicas=1
+llmdbenchmark --spec cicd/kind-sim-mc-leaf standup -p mc-b --set decode.replicas=3
+```
+
+### 3. Slow the sims down
+
+Without this the sims answer instantly, nothing ever queues, and both arms score
+identically — see "Load must saturate" in `CLAUDE.md`.
 
 ```bash
 for ns in mc-a mc-b; do
@@ -53,53 +60,111 @@ for ns in mc-a mc-b; do
 done
 ```
 
-### Measured (1 vs 3 decode pods, 200 requests, concurrency 16)
+### 4. Publish the cluster list
 
-| arm | mc-a (1 pod) | mc-b (3 pods) | wall clock |
-|---|---|---|---|
-| smart (kv-cache + queue scorers) | 61 (30%) | 139 (69%) | 74s |
-| baseline (`random-picker`) | 99 (49%) | 101 (50%) | 113s |
+[`router/clusters.yaml`](./router/clusters.yaml) is what `multicluster-file-discovery`
+reads. It is a template because ClusterIPs are only known once the leaves exist,
+and they must be IPs rather than DNS names.
 
-Scored routing tracks the 1:3 capacity ratio and finishes the same work 34%
-faster; the baseline keeps overloading the single-pod cluster. A repeat of the
-smart arm gave 57/143 (28%/71%), so run-to-run spread is a few points.
+```bash
+export MC_A_NS=mc-a MC_B_NS=mc-b
 
-Namespaces, the Kind cluster name, and the router release name are all just
-defaults — override with `ROUTER_NS`, `RELEASE`, `CHART_VERSION`, `MODEL`,
-`MAX_TOKENS`, `CONCURRENCY`, `ARM`. Nothing is pinned to a machine or a user.
+gw_ip()   { kubectl -n "$1" get svc -l gateway.networking.k8s.io/gateway-name -o jsonpath='{.items[0].spec.clusterIP}'; }
+gw_port() { kubectl -n "$1" get svc -l gateway.networking.k8s.io/gateway-name -o jsonpath='{.items[0].spec.ports[?(@.port==80)].port}'; }
+epp_ip()  { kubectl -n "$1" get "$(kubectl -n "$1" get svc -o name | grep -m1 -- '-router-epp$')" -o jsonpath='{.spec.clusterIP}'; }
 
-## Gotchas
+export MC_A_GW_IP=$(gw_ip "$MC_A_NS") MC_A_GW_PORT=$(gw_port "$MC_A_NS") MC_A_EPP_IP=$(epp_ip "$MC_A_NS")
+export MC_B_GW_IP=$(gw_ip "$MC_B_NS") MC_B_GW_PORT=$(gw_port "$MC_B_NS") MC_B_EPP_IP=$(epp_ip "$MC_B_NS")
 
-These are all load-bearing — each one silently produces a no-op rather than an error.
+kubectl create ns mc-router
+envsubst < epp_benchmarking/router/clusters.yaml \
+  | kubectl -n mc-router create configmap mc-clusters --from-file=clusters.yaml=/dev/stdin \
+      --dry-run=client -o yaml | kubectl apply -f -
+```
 
-- **Leaf metrics auth.** The EPP metrics endpoint defaults to
-  `--metrics-endpoint-auth=true` and answers **401** to an anonymous scrape.
-  `multicluster-metrics-data-source` supports TLS client certs but *no bearer
-  token*, so the scrape fails and both scorers return no score. The leaf
-  scenario sets `router.monitoring.prometheus.auth.enabled: false`.
-- **Scheme.** The plugin defaults to `https`; a leaf EPP serves metrics over
-  plain HTTP unless `metrics-cert-dir` is set. Hence `scheme: http`.
-- **`schedulingProfiles` is not optional.** An empty list passes validation and
-  yields a profile with no scorers — the EPP starts happily and scores nothing.
-  The PR's own config example omits it.
-- **Addresses must be IPs.** `ORIGINAL_DST` with `use_http_header` parses the
-  header as `IP:port`. File discovery permits hostnames, but a DNS name will not
-  resolve there. `deploy_router.sh` reads live ClusterIPs for this reason.
-- **Image.** `v0.9.0` predates the PR and has none of the multicluster plugins;
-  the router pins `tag: main`. All six types are registered **Alpha**, so
-  `--allow-experimental-plugins` is required or the EPP refuses to start.
-- **Load must be concurrent.** Both scorers read queue depth and KV usage. Under
-  sequential load every cluster is idle and scores 0, `max-score-picker` ties,
-  and the split looks random on *both* arms.
-- The router EPP also auto-instantiates the stock `metrics-data-source` /
-  `core-metrics-extractor` as a second datalayer poller. It scrapes the peer
-  gateway port and logs failures; harmless, but it is noise in the logs.
+### 5. Install the router
+
+The chart's default EPP image has no multicluster plugins;
+[`router/values.yaml`](./router/values.yaml) pins a newer one that does, and
+enables the Alpha plugin gate.
+
+```bash
+helm upgrade --install mc-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.9.0 \
+  -n mc-router -f epp_benchmarking/router/values.yaml
+kubectl -n mc-router rollout status deploy/mc-router-epp --timeout=300s
+```
+
+### 6. Benchmark through the router
+
+`--endpoint-url` points the harness at the router instead of a single stack, so
+the load runs in-cluster and every request is routed by the multicluster
+scorers.
+
+```bash
+epp_benchmarking/tools/analyze_split.py --save /tmp/before.json mc-a mc-b
+
+llmdbenchmark --spec cicd/kind-sim-mc-leaf run -p mc-a -l inference-perf \
+  -w mc_kind_concurrent.yaml \
+  --endpoint-url http://mc-router-epp.mc-router.svc.cluster.local:8081
+```
+
+To compare against the no-scoring baseline, swap the picker and repeat step 6.
+`clusters.yaml` is unchanged.
+
+```bash
+helm upgrade --install mc-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.9.0 \
+  -n mc-router -f epp_benchmarking/router/values.yaml \
+  --set router.epp.pluginsConfigFile=mc-random.yaml
+kubectl -n mc-router rollout restart deploy/mc-router-epp
+kubectl -n mc-router rollout status deploy/mc-router-epp --timeout=300s
+```
+
+## Analysing a run
+
+`tools/analyze_split.py` reports where traffic actually landed — counted from
+each leaf EPP's own request histogram, not from what the router logged — plus
+the latency and throughput the harness recorded. Pass the results directory
+`llmdbenchmark run` printed as `Local results:`.
+
+```bash
+epp_benchmarking/tools/analyze_split.py \
+  --since /tmp/before.json \
+  --results <results-dir> \
+  mc-a mc-b
+```
+
+It prints the per-namespace request counts and shares, then the run's request
+count, wall clock, throughput, and mean/p90 TTFT and latency:
+
+```
+routed <n> requests
+  mc-a     <n>   <pct>
+  mc-b     <n>   <pct>
+
+run summary (<treatment>)
+  requests        <n> ok / <n> failed
+  wall clock      <s>
+  throughput      <req/s>, <out-tok/s>
+  TTFT            mean <s>  p90 <s>
+  latency         mean <s>  p90 <s>
+```
+
+Run it once per arm and compare: the scored arm should track the leaves' capacity
+ratio while the `random-picker` baseline splits evenly.
+
+The counters are cumulative, hence the `--save`/`--since` pair around each run.
+Metrics are read through the API server's service proxy, so no port-forward is
+needed.
 
 ## Files
 
 | path | what |
 |---|---|
-| `config/scenarios/cicd/kind-sim-mc-leaf.yaml` | leaf stack, stood up once per namespace |
+| `CLAUDE.md` | gotchas, workload sizing, design reasoning |
+| `router/clusters.yaml` | peer cluster list; `envsubst` template (step 4) |
 | `router/values.yaml` | router EPP chart values; both arms in `pluginsCustomConfig` |
-| `tools/deploy_router.sh` | renders `clusters.yaml` from live ClusterIPs, installs the router |
-| `tools/route_split.sh` | drives load, reports where it landed |
+| `tools/analyze_split.py` | routing split + run summary |
+| `config/scenarios/cicd/kind-sim-mc-leaf.yaml` | leaf stack, stood up once per namespace |
+| `workload/profiles/inference-perf/mc_kind_concurrent.yaml.in` | saturating ladder for the sims |

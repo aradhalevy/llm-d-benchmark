@@ -5,7 +5,8 @@
 #   --set router.epp.pluginsConfigFile=mc-smart.yaml    (scored routing)
 #   --set router.epp.pluginsConfigFile=mc-random.yaml   (baseline, ~50/50)
 #
-# clusters.yaml is generated from live ClusterIPs by tools/deploy_router.sh.
+# Expects a `mc-clusters` ConfigMap holding clusters.yaml, built from live
+# ClusterIPs -- see step 4 of the README.
 
 router:
   # File discovery supplies the endpoints, so this selector is required by the
