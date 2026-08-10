@@ -19,9 +19,9 @@ Troubleshooting and Gotchas are in [`CLAUDE.md`](./CLAUDE.md).
 
 **Prerequisites:** `llmdbenchmark` installed and on your `PATH` — see
 [Getting Started → Install](../README.md#install) in the repo README — plus
-`kind`, `docker`, `helm`, and `envsubst` (from GNU gettext; not installed by
-default on macOS). Every command below runs from the repo root against your
-default kubeconfig.
+`helm` and `envsubst` (from GNU gettext; not installed by default on macOS),
+and `kind` + `docker` for the Kind walkthrough. Every command below runs from
+the repo root against your default kubeconfig.
 
 ## Kind (no GPU)
 
@@ -141,6 +141,75 @@ kubectl -n mc-router rollout restart deploy/mc-router-epp
 kubectl -n mc-router rollout status deploy/mc-router-epp --timeout=300s
 ```
 
+## OpenShift (GPU)
+
+The same three namespaces with real Qwen3-8B, one GPU per decode pod — four for
+the 1+3 layout below. Steps 4–6 above are reused as-is; only standup differs.
+
+Stand the leaves up **before** the router: the standalone chart renders an
+InferencePool, and the `inference.networking.k8s.io` CRD arrives with the first
+leaf.
+
+### 1. Stand up a leaf in each namespace
+
+No image side-loading and no `kind create` — the cluster pulls normally and
+`llmdbenchmark` creates the namespaces. Export `HF_TOKEN` if your cluster needs
+one for Hugging Face; standup turns it into a Secret.
+
+```bash
+llmdbenchmark --spec cicd/ocp-mc-leaf standup -p <prefix>-mc-a --set decode.replicas=1
+llmdbenchmark --spec cicd/ocp-mc-leaf standup -p <prefix>-mc-b --set decode.replicas=3
+```
+
+On a mixed cluster, pin the GPU model with
+`--set decode.acceleratorType.labelKey=nvidia.com/gpu.product --set
+decode.acceleratorType.labelValue=<product>`. Prefer this over
+`affinity.nodeSelector`, which is ignored unless `affinity.enabled` is also set.
+
+There is no equivalent of step 3: the servers run unthrottled and the pressure
+comes from the request rate instead. See "Sizing the workload" in `CLAUDE.md`
+for why the 1+3 asymmetry is what makes that enough.
+
+### 2. Publish the cluster list
+
+Run step 4's block with its first line replaced by the one below — the rest,
+including the empty-value guard, is unchanged. The helpers read ClusterIPs, so
+they work whether the leaf gateway Service is NodePort or LoadBalancer.
+
+```bash
+export MC_A_NS=<prefix>-mc-a MC_B_NS=<prefix>-mc-b MC_ROUTER_NS=<prefix>-mc-router
+```
+
+Substitute `$MC_ROUTER_NS` for the literal `mc-router` in step 4's
+`create configmap` line too — on a shared cluster you rarely own the bare name.
+
+### 3. Install the router
+
+Step 5 plus a second values file that restores the chart's production sizing —
+the Kind values throttle the Envoy to one core.
+
+```bash
+helm upgrade --install mc-router \
+  oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.9.0 \
+  -n "$MC_ROUTER_NS" \
+  -f epp_benchmarking/router/values.yaml \
+  -f epp_benchmarking/router/values-ocp.yaml
+kubectl -n "$MC_ROUTER_NS" rollout status deploy/mc-router-epp --timeout=600s
+```
+
+### 4. Benchmark through the router
+
+```bash
+epp_benchmarking/tools/analyze_split.py --save /tmp/before.json "$MC_A_NS" "$MC_B_NS"
+
+llmdbenchmark --spec cicd/ocp-mc-leaf run -p "$MC_A_NS" -l inference-perf \
+  -w mc_saturation_poisson.yaml \
+  --endpoint-url "http://mc-router-epp.$MC_ROUTER_NS.svc.cluster.local:8081"
+```
+
+The ladder is 45 minutes per arm, so budget an hour and a half for the pair.
+Swap to the baseline arm as in Kind, keeping both `-f` files.
+
 ## Analysing a run
 
 `tools/analyze_split.py` reports where traffic actually landed — counted from
@@ -178,6 +247,44 @@ The counters are cumulative, hence the `--save`/`--since` pair around each run.
 Metrics are read through the API server's service proxy, so no port-forward is
 needed.
 
+### Latency over the ladder
+
+`plot_e2e_timeseries.py` draws every request as a point at its arrival time with
+a continuous p50 line across all stages, and labels each stage band with its
+requested rate — so a latency knee can be read off the rung that caused it.
+Needs `matplotlib`.
+
+Extraction is a separate step because `per_request_lifecycle_metrics.json` is
+multi-GB (2.9GB for 11k requests) and usually truncated mid-write; the extractor
+recovers every complete record rather than failing on the tail.
+
+```bash
+run=<results-dir>/<run-subdir>
+epp_benchmarking/tools/extract_per_request_slim.py \
+  $run/per_request_lifecycle_metrics.json $run/per_request_slim.json
+epp_benchmarking/tools/plot_e2e_timeseries.py $run --bin 15
+```
+
+`--bin` sets the median window in seconds; `--log` switches to a log y axis,
+which is worth it when an arm collapses and the spread crosses two decades.
+
+To put both arms on one axes, one colour per run:
+
+```bash
+epp_benchmarking/tools/plot_e2e_compare.py $smart_run $random_run \
+  --labels scored,baseline --log
+```
+
+Its x axis is stage index rather than elapsed time: an arm that falls behind
+stretches its stages, so real time would slide identical rungs out of alignment.
+Each run is warped through its own stage windows; medians are still taken over
+real `--bin` second windows.
+
+Colouring points by *leaf* is not possible from harness data — the per-request
+records carry no upstream identity, and both leaves answer to the same model
+name. Per-leaf behaviour comes from the EPP gauges instead (`analyze_split.py`,
+or `llm_d_epp_average_*` scraped over the run).
+
 ## Files
 
 | path | what |
@@ -185,6 +292,12 @@ needed.
 | `CLAUDE.md` | gotchas, workload sizing, design reasoning |
 | `router/clusters.yaml` | peer cluster list; `envsubst` template (step 4) |
 | `router/values.yaml` | router EPP chart values; both arms in `pluginsCustomConfig` |
+| `router/values-ocp.yaml` | sizing overlay for the GPU run |
 | `tools/analyze_split.py` | routing split + run summary |
-| `config/scenarios/cicd/kind-sim-mc-leaf.yaml` | leaf stack, stood up once per namespace |
+| `tools/extract_per_request_slim.py` | slim per-request records from the multi-GB harness dump |
+| `tools/plot_e2e_timeseries.py` | per-request latency scatter + p50 over the RPS ladder |
+| `tools/plot_e2e_compare.py` | the same, two or more runs overlaid, one colour per run |
+| `config/scenarios/cicd/kind-sim-mc-leaf.yaml` | leaf stack (sim), stood up once per namespace |
+| `config/scenarios/cicd/ocp-mc-leaf.yaml` | leaf stack (Qwen3-8B, 1 GPU/pod) |
 | `workload/profiles/inference-perf/mc_kind_concurrent.yaml.in` | saturating ladder for the sims |
+| `workload/profiles/inference-perf/mc_saturation_poisson.yaml.in` | Poisson RPS ladder for the GPU leaves |

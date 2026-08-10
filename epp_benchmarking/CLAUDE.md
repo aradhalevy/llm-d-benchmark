@@ -45,6 +45,16 @@ makes them expensive.
   split looks random on *both* arms -- so a too-gentle workload silently
   produces a null result rather than a failure.
 
+- **Router before leaves (OpenShift).** The standalone chart renders an
+  InferencePool of its own, so `inference.networking.k8s.io` must already exist.
+  On Kind the leaf standup installs it; installing the router into a cluster
+  with no llm-d stack yet fails on the missing CRD.
+
+- **Helm deep-merges the two values files.** `-f values.yaml -f values-ocp.yaml`
+  merges key by key, so a `limits` entry left out of the overlay silently keeps
+  the Kind value. Omitting `cpu` there leaves the Envoy capped at 1 core while
+  the memory limit reads 16Gi -- which looks deliberate. Restate every field.
+
 - **Second datalayer poller.** The EPP auto-instantiates the stock
   `metrics-data-source` / `core-metrics-extractor` alongside the multicluster
   pair. It scrapes the peer gateway port and logs failures. Harmless, but it is
@@ -59,14 +69,34 @@ outright, and the right size is hardware-specific.
 at `--max-num-seqs=2`, so 1+3 pods saturate around 8 concurrent. Prompts must
 stay under the scenario's `maxModelLen: 1024`, or every request 400s.
 
-Porting this to accelerators needs a much heavier profile, and a much lighter
-one is not safe either:
+A GPU-sized ladder pointed at Kind sends thousands of requests at roughly
+3 req/s and the harness times out before finishing.
 
-- Real GPUs are far harder to saturate than they look. On H100s running
-  Qwen3-8B, concurrency 256 with 512-token outputs peaked at **7% KV
-  utilization and zero queueing** -- no signal at all, so both arms tie.
-- A GPU-sized ladder pointed at Kind sends thousands of requests at roughly
-  3 req/s and the harness times out before finishing.
+Accelerators are the harder direction. On H100s running Qwen3-8B, a fixed-
+concurrency run at 256 with 512-token outputs peaked at **7% KV utilization and
+zero queueing** -- no signal, both arms tie. An 80GB card holds far more of an
+8B model's KV than a closed-loop harness ever offers it: every request the
+server has not answered is a request the harness has not sent.
+
+`mc_saturation_poisson.yaml` uses an open-loop Poisson arrival rate instead, so
+backlog accumulates when a leaf falls behind rather than throttling the client.
+The servers stay unthrottled -- no `--max-num-seqs` cap, `gpuMemoryUtilization`
+at 0.90 -- so the numbers remain a real capacity measurement.
+
+The asymmetry is what makes the rates enough. Under an even split a 1+3 layout
+puts half the fleet's rate on one GPU, so the small leaf saturates at roughly a
+third of the rate the fleet could take. The scored arm should close that gap;
+the `random-picker` arm cannot, and its queue depth on the small leaf is the
+tell. Fleet-wide saturation is not required and would mostly cost GPU hours.
+
+The ladder climbs 3->15 req/s and back down, 300s per stage with `interval: 0`,
+so a stage's backlog carries into the next one. ~22.5k requests, ~45 min per
+arm. The descent is not decoration: a router that only sheds load one way looks
+correct on the way up.
+
+`total_count: 200` means 200 distinct prompts are reused across those 22.5k
+requests, so prefix-cache hits are common. That inflates throughput relative to
+unique traffic, equally on both arms.
 
 ## Load has to come from inside the cluster
 
