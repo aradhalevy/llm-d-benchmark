@@ -5,7 +5,9 @@ pods. Peer clusters are simulated with one namespace per cluster: each leaf
 namespace runs a normal llm-d stack, and the router runs the standalone
 (`epponly`) topology, so its Envoy forwards to whatever `IP:port` the EPP picks.
 
-Troubleshooting and gotchas are in [`CLAUDE.md`](./CLAUDE.md).
+Troubleshooting and gotchas are in
+[`troubleshooting_gotchas.md`](./troubleshooting_gotchas.md); design reasoning
+and workload sizing are in [`CLAUDE.md`](./CLAUDE.md).
 
 **Prerequisites:** `llmdbenchmark` on your `PATH` (see
 [Getting Started → Install](../README.md#install)), plus `helm`, `envsubst`
@@ -52,11 +54,8 @@ being a variable:
 --set router.epp.image.registry=ghcr.io/mohammad-nassar10 --set router.epp.image.tag=dev
 ```
 
-Two things the TTFT arm fails silently without: the workload **must stream** (TTFT
-comes from the first response chunk; a single-chunk response is discarded), and
-each leaf needs `minRequests` (default 10) observations before it is trusted —
-until then it scores 0 and only `explorationRate` (default 0.1) probes it. On
-short runs that warm-up dominates; see `CLAUDE.md`.
+The TTFT arm needs a **streaming** workload and a run long enough to outlast its
+warm-up; both failure modes are silent (gotchas 43 and 49).
 
 ### Publish the cluster list
 
@@ -228,22 +227,9 @@ at all once a single axis has been stretched by a 130 s excursion.
 ## Capturing the EPP log
 
 Only needed if you want the per-decision record (`--set router.epp.flags.v=4`).
-
-At `--v=4` the EPP logs once per response body chunk, so an arm with 256-token
-outputs runs to millions of lines. kubelet rotates the container log at 10Mi and
-`kubectl logs` only ever reads the current file, so most of a run vanishes
-silently. Measured on one 400-request arm:
-
-| approach | captured |
-|---|---|
-| laptop-side `kubectl logs` | 250 / 400 |
-| in-cluster `logs -f` with `--since=5s` restart loop | 28 / 400 |
-| in-cluster follow, filtered before writing | **400 / 400** |
-
-[`router/logtail.yaml`](./router/logtail.yaml) greps down to the routing record
-*before* writing, so the kept lines are a rounding error next to the chunk flood
-and the follower never falls behind; it reconnects with `--tail=-1`, re-reading
-the whole current file rather than a time window, so rotation cannot open a gap.
+Reading it with `kubectl logs` loses most of a run; use
+[`router/logtail.yaml`](./router/logtail.yaml), which follows the stream
+in-cluster and filters before writing (gotcha 29).
 
 ```bash
 kubectl apply -n "$MC_ROUTER_NS" -f epp_benchmarking/router/logtail.yaml
@@ -252,6 +238,11 @@ kubectl -n "$MC_ROUTER_NS" wait --for=condition=Ready pod/epp-logtail --timeout=
 # after each arm -- drains the buffer and resets it, so arms stay separate
 epp_benchmarking/tools/collect_epp_log.sh "$MC_ROUTER_NS" /tmp/epp-queue.log
 ```
+
+It prints the distinct request IDs captured. **Check that against the requests
+the ladder offered** (sum of rate × duration) — capture is not unconditionally
+lossless, and line counts stay healthy while a partial capture happens
+(gotcha 30).
 
 ## Analysing results
 
@@ -281,15 +272,15 @@ run summary (<treatment>)
 
 ### Latency over a ladder
 
-**Experiment 1 only.** These read `per_request_lifecycle_metrics.json`, which
-the GPU profiles switch off — at 45k requests writing it OOM-killed the harness
-pod. On experiments 2 and 3 use the per-stage plots below instead.
+**Experiment 1 only.** These read `per_request_lifecycle_metrics.json`, which the
+GPU profiles switch off (gotcha 38). For experiments 2 and 3 use the per-stage
+plots below.
 
 `plot_e2e_timeseries.py` draws every request at its arrival time with a
 continuous p50 line across all stages, labelling each stage band with its rate.
-Extraction is separate because `per_request_lifecycle_metrics.json` is multi-GB
-and usually truncated mid-write; the extractor recovers every complete record
-instead of failing on the tail.
+Extraction is separate because that file is multi-GB and usually truncated
+mid-write; the extractor recovers every complete record instead of failing on
+the tail.
 
 ```bash
 run=<results-dir>/<run-subdir>
@@ -304,8 +295,7 @@ epp_benchmarking/tools/plot_e2e_compare.py $smart_run $random_run \
 
 `plot_e2e_compare.py`'s x axis is stage progress, not elapsed time: an arm that
 falls behind stretches its stages, so real time would slide identical rungs out
-of alignment. Each run is warped through its own stage windows; medians are still
-taken over real `--bin` second windows, and each run's duration is in the legend.
+of alignment.
 
 Colouring points by *leaf* is not possible from harness data — the per-request
 records carry no upstream identity and both leaves answer to the same model name.
@@ -339,7 +329,8 @@ covers that one leaf, not the fleet.
 
 | path | what |
 |---|---|
-| `CLAUDE.md` | gotchas, workload sizing, design reasoning |
+| `troubleshooting_gotchas.md` | 49 numbered gotchas, EPP and IPP, mostly OpenShift |
+| `CLAUDE.md` | workload sizing and design reasoning |
 | `router/clusters.yaml` | peer cluster list; `envsubst` template |
 | `router/clusters-solo.yaml` | single-endpoint list, for experiment 3 |
 | `router/values.yaml` | router EPP chart values; all three arms in `pluginsCustomConfig` |
