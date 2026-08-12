@@ -31,21 +31,45 @@ def _wall(s):
         tzinfo=datetime.timezone.utc).timestamp()
 
 
-def stage_windows(run):
+def stage_windows(run, cap=None):
+    """[(stage, start, end)] in seconds elapsed from stage 0.
+
+    "run completed" is logged when the harness moves on, not when the last
+    response lands, and it can trail by hours if the run stalls afterwards --
+    one baseline arm logged stage 1 as 14857s long against 407s of requests.
+    Left uncorrected that stretches the stage so far that every warped point
+    piles up on the boundary. So each stage ends no later than the next one
+    starts, and the last no later than `cap`, the final request time.
+    """
     st, en = {}, {}
     for line in open(f"{run}/stdout.log", errors="replace"):
         m = STAGE_RE.search(line)
         if m:
             (st if m.group(3) == "started" else en)[int(m.group(2))] = _wall(m.group(1))
     t0 = st[min(st)]
-    return [(n, st[n] - t0, en.get(n, st[n]) - t0) for n in sorted(st)]
+    ns = sorted(st)
+    out = []
+    for i, n in enumerate(ns):
+        end = en.get(n, st[n])
+        if i + 1 < len(ns):
+            end = min(end, st[ns[i + 1]])
+        end -= t0
+        if i + 1 == len(ns) and cap is not None:
+            end = min(end, cap)
+        out.append((n, st[n] - t0, max(end, st[n] - t0)))
+    return out
 
 
-def rps_ladder(run):
+def stage_labels(run):
+    """{stage: label}. Only open-loop stages report a rate; a `type: concurrent`
+    stage puts num_requests in requested_rate, so it is labelled by concurrency.
+    """
     out = {}
     for f in glob.glob(f"{run}/stage_*_lifecycle_metrics.json"):
         n = int(f.split("stage_")[1].split("_")[0])
-        out[n] = json.load(open(f))["load_summary"]["requested_rate"]
+        s = json.load(open(f))["load_summary"]
+        out[n] = (f"{s['concurrency']:g} concurrent" if s.get("concurrency")
+                  else f"{s['requested_rate']:g} RPS")
     return out
 
 
@@ -85,12 +109,12 @@ def main():
 
     fig, ax = plt.subplots(figsize=(13, 6))
 
-    rps = rps_ladder(runs[0])
+    labels_by_stage = stage_labels(runs[0])
     nstages = max(len(stage_windows(r)) for r in runs)
     for n in range(nstages):
         ax.axvspan(n, n + 1, color="0.90" if n % 2 == 0 else "0.83", zorder=0)
-        if n in rps:
-            ax.text(n + 0.5, 0.97, f"{rps[n]:g} RPS", transform=ax.get_xaxis_transform(),
+        if n in labels_by_stage:
+            ax.text(n + 0.5, 0.97, labels_by_stage[n], transform=ax.get_xaxis_transform(),
                     ha="center", va="top", fontsize=9, color="dimgray")
 
     for i, (run, label) in enumerate(zip(runs, labels)):
@@ -102,16 +126,21 @@ def main():
         t0 = min(r["t"] for r in recs)
         t = np.array([r["t"] - t0 for r in recs])
         lat = np.array([r["lat"] for r in recs])
-        W = stage_windows(run)
+        W = stage_windows(run, cap=t.max())
         c = COLORS[i % len(COLORS)]
 
-        ax.scatter(to_stage_x(t, W), lat, s=3, alpha=0.10, color=c, linewidths=0, zorder=2)
+        # Scale opacity to the point count: one setting cannot serve a 400-request
+        # sim arm and an 11k-request GPU run.
+        ax.scatter(to_stage_x(t, W), lat, s=3, color=c, linewidths=0, zorder=2,
+                   alpha=min(0.5, max(0.05, 200 / len(recs))))
 
         b = (t / a.bin).astype(int)
         ks = np.unique(b)
         p50 = np.array([np.median(lat[b == k]) for k in ks])
         ax.plot(to_stage_x((ks + 0.5) * a.bin, W), p50, "-", color=c, lw=2.0, zorder=3,
-                label=f"{label} — p50/{a.bin:g}s (peak {p50.max():.0f}s)")
+                # The x axis is stage progress, so the run's duration -- often
+                # the clearest difference between arms -- has to be stated.
+                label=f"{label} — p50/{a.bin:g}s, peak {p50.max():.0f}s, {t.max():.0f}s run")
         print(f"{label}: {len(recs)} ok, p50 peak {p50.max():.1f}s, "
               f"mean {lat.mean():.1f}s, p90 {np.percentile(lat, 90):.1f}s")
 

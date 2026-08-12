@@ -3,7 +3,7 @@
 # One llm-d stack per namespace; the namespaces stand in for peer clusters.
 # Stand the same scenario up twice with asymmetric capacity:
 #
-#   llmdbenchmark --spec cicd/ocp-mc-leaf standup -p <prefix>-mc-a --set decode.replicas=1
+#   llmdbenchmark --spec cicd/ocp-mc-leaf standup -p <prefix>-mc-a --set decode.replicas=2
 #   llmdbenchmark --spec cicd/ocp-mc-leaf standup -p <prefix>-mc-b --set decode.replicas=3
 #
 # Unlike a two-pool-in-one-namespace layout, both leaves can serve the SAME

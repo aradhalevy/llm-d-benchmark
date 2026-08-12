@@ -28,11 +28,18 @@ def _wall(s):
         tzinfo=datetime.timezone.utc).timestamp()
 
 
-def stage_windows(run_dir):
+def stage_windows(run_dir, cap=None):
     """[(stage, start, end)] as seconds elapsed from stage 0, parsed from harness stdout.
 
     Request times are a monotonic clock and these are wall clock, so both are
     reduced to elapsed-from-zero rather than joined directly.
+
+    "run completed" is logged when the harness moves on, not when the last
+    response lands, so a run that stalls afterwards reports an absurdly long
+    final stage -- one baseline arm logged 14857s against 407s of requests,
+    which would centre that band's label far off the right of the plot. Each
+    stage therefore ends no later than the next begins, and the last no later
+    than `cap`, the final request time.
     """
     st, en = {}, {}
     for line in open(f"{run_dir}/stdout.log", errors="replace"):
@@ -42,14 +49,32 @@ def stage_windows(run_dir):
     if not st:
         return []
     t0 = st[min(st)]
-    return [(n, st[n] - t0, en.get(n, st[n]) - t0) for n in sorted(st)]
+    ns = sorted(st)
+    out = []
+    for i, n in enumerate(ns):
+        end = en.get(n, st[n])
+        if i + 1 < len(ns):
+            end = min(end, st[ns[i + 1]])
+        end -= t0
+        if i + 1 == len(ns) and cap is not None:
+            end = min(end, cap)
+        out.append((n, st[n] - t0, max(end, st[n] - t0)))
+    return out
 
 
-def rps_ladder(run_dir):
+def stage_labels(run_dir):
+    """{stage: label} naming what each stage held constant.
+
+    Only open-loop stages report a rate; for `type: concurrent` inference-perf
+    puts num_requests in requested_rate, which is not a rate at all. A closed-
+    loop stage is the one that carries a `concurrency`.
+    """
     out = {}
     for f in glob.glob(f"{run_dir}/stage_*_lifecycle_metrics.json"):
         n = int(f.split("stage_")[1].split("_")[0])
-        out[n] = json.load(open(f))["load_summary"]["requested_rate"]
+        s = json.load(open(f))["load_summary"]
+        out[n] = (f"{s['concurrency']:g} concurrent" if s.get("concurrency")
+                  else f"{s['requested_rate']:g} RPS")
     return out
 
 
@@ -85,15 +110,17 @@ def main():
 
     fig, ax = plt.subplots(figsize=(13, 6))
 
-    windows, rps = stage_windows(run), rps_ladder(run)
+    windows, labels = stage_windows(run, cap=ok[:, 0].max()), stage_labels(run)
     for n, s, e in windows:
         ax.axvspan(s, e, color="0.90" if n % 2 == 0 else "0.83", zorder=0)
-        if n in rps:
-            ax.text((s + e) / 2, 0.97, f"{rps[n]:g} RPS", transform=ax.get_xaxis_transform(),
+        if n in labels:
+            ax.text((s + e) / 2, 0.97, labels[n], transform=ax.get_xaxis_transform(),
                     ha="center", va="top", fontsize=9, color="dimgray")
 
-    ax.scatter(ok[:, 0], ok[:, 1], s=3, alpha=0.18, color="#1f77b4",
-               linewidths=0, zorder=2, label="request")
+    # Scale opacity to the point count: one setting cannot serve a 400-request
+    # sim arm and an 11k-request GPU run.
+    ax.scatter(ok[:, 0], ok[:, 1], s=3, color="#1f77b4", linewidths=0, zorder=2,
+               label="request", alpha=min(0.6, max(0.08, 300 / len(ok))))
     if len(bad):
         ax.scatter(bad[:, 0], bad[:, 1], s=9, alpha=0.8, color="#d62728", marker="x",
                    zorder=4, label=f"failed ({len(bad)})")
